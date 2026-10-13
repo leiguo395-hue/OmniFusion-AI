@@ -31,11 +31,11 @@ import android.security.keystore.KeyProperties
 import kotlin.concurrent.thread
 
 class MainActivity : Activity() {
-    private val bg = Color.rgb(11,14,24)
-    private val panel = Color.rgb(27,33,50)
-    private val accent = Color.rgb(120,111,247)
-    private val white = Color.rgb(244,246,255)
-    private val dim = Color.rgb(154,164,193)
+    private val bg get() = if(prefs.getBoolean("lightMode",false)) Color.rgb(238,241,248) else Color.rgb(11,14,24)
+    private val panel get() = if(prefs.getBoolean("lightMode",false)) Color.rgb(255,255,255) else Color.rgb(27,33,50)
+    private val accent get() = try { Color.parseColor(prefs.getString("themeAccent","#786FF7")) } catch(_:Exception) { Color.rgb(120,111,247) }
+    private val white get() = if(prefs.getBoolean("lightMode",false)) Color.rgb(25,32,48) else Color.rgb(244,246,255)
+    private val dim get() = if(prefs.getBoolean("lightMode",false)) Color.rgb(77,87,108) else Color.rgb(154,164,193)
     private val prefs by lazy { getSharedPreferences("omni", MODE_PRIVATE) }
     private var model = "openrouter/free"
     private var thinking = "high"
@@ -58,14 +58,15 @@ class MainActivity : Activity() {
     private fun dp(v:Int) = (v*resources.displayMetrics.density).toInt()
     private fun shape(color:Int, radius:Int=18) = GradientDrawable().apply {setColor(color);cornerRadius=dp(radius).toFloat()}
     private fun text(s:String, size:Float=15f, color:Int=white, bold:Boolean=false) = TextView(this).apply {
-        setText(s);textSize=size;setTextColor(color);if(bold)setTypeface(null,Typeface.BOLD);gravity=Gravity.CENTER_VERTICAL;setTextIsSelectable(true)
+        setText(s);textSize=size;setTextColor(color);if(bold)setTypeface(null,Typeface.BOLD);gravity=Gravity.CENTER_VERTICAL;isClickable=false
     }
     private fun vertical()=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL}
     private fun horizontal()=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL;gravity=Gravity.CENTER_VERTICAL}
     private fun lp(top:Int=0)=LinearLayout.LayoutParams(-1,-2).apply{topMargin=dp(top)}
     private fun button(s:String, action:()->Unit)=text(s,14f,white,true).apply{
         gravity=Gravity.CENTER;setPadding(dp(13),dp(11),dp(13),dp(11))
-        background=RippleDrawable(ColorStateList.valueOf(Color.rgb(72,79,128)),shape(panel,14),null)
+        background=RippleDrawable(ColorStateList.valueOf(accent and 0x00FFFFFF or 0x55000000),shape(panel,14),null)
+        minHeight=dp(48);isClickable=true;isFocusable=true
         setOnClickListener{
             performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
             animate().scaleX(.96f).scaleY(.96f).setDuration(85).withEndAction{
@@ -128,7 +129,8 @@ class MainActivity : Activity() {
     }
     private fun navigate(page:Int){
         if(busy && page!=0){Toast.makeText(this,"回复中，请等待完成",Toast.LENGTH_SHORT).show();return}
-        screen=page;root=vertical().apply{setBackgroundColor(bg)}
+        screen=page;window.statusBarColor=bg;window.navigationBarColor=bg
+        root=vertical().apply{setBackgroundColor(bg)}
         val top=horizontal().apply{setPadding(dp(20),dp(13),dp(18),dp(13))}
         top.addView(text("✦  OmniFusion",24f,white,true),LinearLayout.LayoutParams(0,-2,1f))
         top.addView(button("⚙"){navigate(3)})
@@ -138,8 +140,10 @@ class MainActivity : Activity() {
         val tabs=listOf("◉\n聊天","✧\n创作","▤\n历史","⚙\n设置")
         tabs.forEachIndexed{i,s->
             val b=text(s,12f,if(page==i)white else dim,page==i).apply{
-                gravity=Gravity.CENTER;background=if(page==i)shape(Color.rgb(55,58,94),12)else null
-                setOnClickListener{navigate(i)}
+                gravity=Gravity.CENTER;minHeight=dp(52)
+                background=RippleDrawable(ColorStateList.valueOf(accent and 0x00FFFFFF or 0x44000000),
+                    if(page==i)shape(accent and 0x00FFFFFF or 0x33000000,12) else shape(panel,12),null)
+                setOnClickListener{performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);if(screen!=i)navigate(i)}
             }
             nav.addView(b,LinearLayout.LayoutParams(0,dp(56),1f))
         }
@@ -153,7 +157,7 @@ class MainActivity : Activity() {
         body.addView(text(description,13f,dim).apply{setPadding(dp(19),dp(6),dp(19),dp(19))})
     }
     private fun readableModel(id:String):String {
-        if(id=="openrouter/free")return "随机免费路由"
+        if(id=="openrouter/free")return "AUTO · 免费模型智能路由"
         val n=modelNames[id]?:id.substringAfterLast('/')
         val brand=when{
             id.startsWith("deepseek/")->"深度求索"
@@ -229,11 +233,12 @@ class MainActivity : Activity() {
     }
     private fun modelDialog(){
         AlertDialog.Builder(this).setTitle("中文精选模型中心")
-            .setItems(arrayOf("✦ 随机免费路由（不保证最强）","🏆 中文精选免费模型（在线查询）","✎ 自定义模型 ID（可能付费）")){_,choice->
+            .setItems(arrayOf("✦ AUTO 自动选择免费模型","🏆 精选免费模型（在线查询）","🌐 全部模型目录（含付费，需确认）","✎ 自定义模型 ID（可能付费）")){_,choice->
                 when(choice){
                     0->choose("openrouter/free")
                     1->freeModels()
-                    2->{
+                    2->allModels()
+                    3->{
                         val field=EditText(this).apply{setText(model);setSingleLine()}
                         AlertDialog.Builder(this).setTitle("模型 ID").setView(field)
                             .setPositiveButton("应用"){_,_->choose(field.text.toString().trim())}.setNegativeButton("取消",null).show()
@@ -241,9 +246,21 @@ class MainActivity : Activity() {
                 }
             }.show()
     }
-    private fun choose(id:String){if(id.isNotBlank()){model=id;prefs.edit().putString("model",id).apply();navigate(0)}}
-    private fun freeModels(){
-        Toast.makeText(this,"正在查官方实时目录，只展示零价格模型…",Toast.LENGTH_SHORT).show()
+    private fun choose(id:String){
+        if(id.isBlank())return
+        if(id!="openrouter/free" && !id.endsWith(":free") && id !in verifiedFreeModels){
+            AlertDialog.Builder(this).setTitle("可能产生 API 费用")
+                .setMessage("此模型不是已核实的零价格模型。继续会使用你在 OpenRouter 的余额。确定手动启用吗？")
+                .setPositiveButton("确认使用"){_,_->saveModel(id)}
+                .setNegativeButton("取消",null).show()
+        } else saveModel(id)
+    }
+    private val verifiedFreeModels=mutableSetOf<String>()
+    private fun saveModel(id:String){model=id;prefs.edit().putString("model",id).apply();navigate(0)}
+    private fun allModels(){loadModels(false)}
+    private fun freeModels(){loadModels(true)}
+    private fun loadModels(onlyFree:Boolean){
+    Toast.makeText(this,if(onlyFree)"正在查询零价格模型…" else "正在加载各家模型目录…",Toast.LENGTH_SHORT).show()
         thread{
             try{
                 val conn=URL("https://openrouter.ai/api/v1/models").openConnection() as HttpURLConnection
@@ -251,12 +268,14 @@ class MainActivity : Activity() {
                 val arr=JSONObject(conn.inputStream.bufferedReader().use{it.readText()}).getJSONArray("data")
                 conn.disconnect()
                 val choices=mutableListOf<Triple<String,String,Int>>()
+                val freeIds=mutableSetOf<String>()
                 for(i in 0 until arr.length()){
                     val x=arr.getJSONObject(i);val p=x.optJSONObject("pricing")?:continue
                     val id=x.optString("id")
                     val prompt=p.optString("prompt").toDoubleOrNull()?:continue
                     val completion=p.optString("completion").toDoubleOrNull()?:continue
-                    if(prompt!=0.0||completion!=0.0)continue
+                    val isFree=prompt==0.0 && completion==0.0
+                    if(onlyFree && !isFree)continue
                     val rank=when{
                         id.startsWith("deepseek/")->0
                         id.startsWith("google/")->1
@@ -271,19 +290,21 @@ class MainActivity : Activity() {
                     }
                     val title=x.optString("name",id)
                     choices.add(Triple(id,title,rank))
+                    if(isFree)freeIds.add(id)
                 }
                 choices.sortWith(compareBy<Triple<String,String,Int>>{it.third}.thenBy{it.first})
                 val preferred=choices.filter{it.third<20}
-                val shown=(if(preferred.isNotEmpty())preferred else choices).take(35)
+                val shown=(if(onlyFree && preferred.isNotEmpty())preferred else choices).take(if(onlyFree)35 else 100)
                 runOnUiThread{
                     if(shown.isEmpty()){
                         AlertDialog.Builder(this).setTitle("没有可用的免费模型")
                             .setMessage("官方目录目前未返回零价格模型，请检查网络或稍后再试。")
                             .setPositiveButton("好的",null).show()
                     }else{
+                        verifiedFreeModels.addAll(freeIds)
                         shown.forEach{modelNames[it.first]=it.second}
-                        AlertDialog.Builder(this).setTitle("精选免费模型 · 实时检测零价格")
-                            .setItems(shown.map{"${readableModel(it.first)}\n免费 · ${it.first}"}.toTypedArray()){_,i->choose(shown[i].first)}
+                        AlertDialog.Builder(this).setTitle(if(onlyFree)"精选免费模型" else "多厂商模型中心 · 价格以官方为准")
+                            .setItems(shown.map{"${readableModel(it.first)}\\n${if(it.first in freeIds)"免费" else "可能收费"} · ${it.first}"}.toTypedArray()){_,i->choose(shown[i].first)}
                             .setNegativeButton("取消",null).show()
                     }
                 }
@@ -466,11 +487,47 @@ class MainActivity : Activity() {
                 dialog.dismiss();navigate(3)
             }.setNegativeButton("取消",null).show()
     }
+    private fun themeDialog(){
+        val colors=arrayOf("#786FF7","#258DF1","#08A88A","#F28C49","#E36BA7","#373D51")
+        val names=arrayOf("极光紫","深海蓝","翡翠绿","落日橙","樱花粉","曜石灰")
+        val wrap=vertical().apply{setPadding(dp(18),dp(8),dp(18),dp(4))}
+        val hex=EditText(this).apply{
+            setSingleLine();hint="#786FF7";setText(prefs.getString("themeAccent","#786FF7"))
+            inputType=InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
+        }
+        wrap.addView(text("选择预设或输入 6 位 HEX 颜色",14f,white),lp(4))
+        val row=horizontal()
+        colors.forEachIndexed{i,c->
+            val swatch=TextView(this).apply{
+                text="●";textSize=29f;setTextColor(Color.parseColor(c));gravity=Gravity.CENTER
+                setOnClickListener{hex.setText(c);hex.setSelection(hex.length());performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)}
+                contentDescription=names[i];minHeight=dp(48)
+            }
+            row.addView(swatch,LinearLayout.LayoutParams(0,dp(52),1f))
+        }
+        wrap.addView(row,lp(8));wrap.addView(hex,lp(6))
+        val light=Switch(this).apply{text="浅色模式";setTextColor(white);isChecked=prefs.getBoolean("lightMode",false)}
+        wrap.addView(light,lp(10))
+        AlertDialog.Builder(this).setTitle("Liquid 主题实验室").setView(wrap)
+            .setPositiveButton("应用"){_,_->
+                val value=hex.text.toString().trim()
+                if(!Regex("^#[0-9A-Fa-f]{6}$").matches(value)){
+                    Toast.makeText(this,"请输入 #RRGGBB 格式颜色",Toast.LENGTH_LONG).show()
+                }else{
+                    prefs.edit().putString("themeAccent",value).putBoolean("lightMode",light.isChecked).apply()
+                    navigate(screen)
+                }
+            }.setNegativeButton("取消",null).show()
+    }
     private fun settingsPage(){
         heading("控制中心 ⚙","所有模型、密钥和聊天数据都由你管理。")
         val box=vertical().apply{setPadding(dp(18),0,dp(18),dp(16))}
         box.addView(button(if(secureKey().isEmpty())"🔐  添加 API Key" else "🔐  修改 API Key"){keyDialog()},lp(8))
         box.addView(button("◆  模型：${model.substringAfterLast('/')}"){modelDialog()},lp(12))
+        box.addView(text("个性化 · Liquid 主题",20f,white,true),lp(26))
+        box.addView(button("🎨  自定义主题色与明暗模式"){themeDialog()},lp(10))
+        box.addView(button("🌐  浏览 GPT / Claude / Gemini / DeepSeek / Qwen"){allModels()},lp(10))
+        box.addView(text("模型目录不代表已免费开通。付费模型会二次确认，所有请求使用你自己的 OpenRouter Key。",12f,dim),lp(8))
         box.addView(text("AI 大脑配置",20f,white,true),lp(28))
         box.addView(button("🧠  思考强度："+when(thinking){"low"->"快速";"medium"->"均衡";else->"深度"}){thinkingDialog()},lp(12))
         box.addView(button("✦  交流风格："+when(assistantStyle){"brief"->"简洁";"technical"->"严谨";else->"自然"}){styleDialog()},lp(12))
