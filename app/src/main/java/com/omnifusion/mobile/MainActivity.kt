@@ -10,6 +10,9 @@ import android.content.ContentValues
 import android.os.Build
 import android.view.WindowManager
 import android.view.WindowInsets
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.ViewCompat
 import android.widget.FrameLayout
 import com.example.liquidglass.LiquidGlassView
 import android.graphics.Typeface
@@ -126,7 +129,7 @@ class MainActivity : Activity() {
     private fun items()=chats.getJSONObject(current).getJSONArray("items")
     private fun persist(){prefs.edit().putString("chats",chats.toString()).putInt("current",current).apply()}
     override fun onCreate(savedInstanceState:Bundle?){
-        super.onCreate(savedInstanceState);window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);window.statusBarColor=bg;window.navigationBarColor=bg
+        super.onCreate(savedInstanceState);WindowCompat.setDecorFitsSystemWindows(window,false);window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);window.statusBarColor=bg;window.navigationBarColor=bg
         model=prefs.getString("model","openrouter/free") ?: "openrouter/free"
         thinking=prefs.getString("thinking","high") ?: "high"
         assistantStyle=prefs.getString("style","balanced") ?: "balanced"
@@ -190,26 +193,19 @@ class MainActivity : Activity() {
         }
         root.addView(glassNav)
         setContentView(root)
-        if(Build.VERSION.SDK_INT>=30){
-            // Draw the actual app background behind system bars, inset only interactive content.
-            root.setOnApplyWindowInsetsListener { _, insets ->
-                val status=insets.getInsets(WindowInsets.Type.statusBars())
-                val navBar=insets.getInsets(WindowInsets.Type.navigationBars())
-                val ime=insets.getInsets(WindowInsets.Type.ime())
-                val open=insets.isVisible(WindowInsets.Type.ime())
-                glassNav.visibility=if(open)View.GONE else View.VISIBLE
-                // adjustResize may already shrink the window. Avoid applying IME twice.
-                val rootHeight=root.rootView.height
-                val visible=android.graphics.Rect()
-                root.getWindowVisibleDisplayFrame(visible)
-                val alreadyResized=(rootHeight-visible.height())>dp(140)
-                val bottom=if(open && !alreadyResized)ime.bottom else if(open)0 else navBar.bottom
-                if(root.paddingTop!=status.top || root.paddingBottom!=bottom)
-                    root.setPadding(0,status.top,0,bottom)
-                insets
-            }
-            root.requestApplyInsets()
+        // Edge-to-edge layout: apply IME and system bars exactly once to the root.
+        // Avoid unreliable screen-height calculations and double adjustResize.
+        ViewCompat.setOnApplyWindowInsetsListener(root){ _, insets ->
+            val bars=insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            val ime=insets.getInsets(WindowInsetsCompat.Type.ime())
+            val open=insets.isVisible(WindowInsetsCompat.Type.ime())
+            glassNav.visibility=if(open)View.GONE else View.VISIBLE
+            val bottom=if(open)ime.bottom else bars.bottom
+            if(root.paddingTop!=bars.top || root.paddingBottom!=bottom)
+                root.setPadding(0,bars.top,0,bottom)
+            insets
         }
+        ViewCompat.requestApplyInsets(root)
         when(page){0->chatPage();1->createPage();2->historyPage();else->settingsPage()}
         body.alpha=0f;body.translationY=dp(9).toFloat()
         body.animate().alpha(1f).translationY(0f).setDuration(210).setInterpolator(DecelerateInterpolator()).start()
@@ -519,31 +515,9 @@ class MainActivity : Activity() {
     }
     private fun imageCreator(){
         if(secureKey().isBlank()){keyDialog();return}
-        Toast.makeText(this,"正在加载图片模型…",Toast.LENGTH_SHORT).show()
-        thread {
-            try {
-                val c=URL("https://openrouter.ai/api/v1/images/models").openConnection() as HttpURLConnection
-                c.setRequestProperty("Authorization","Bearer "+secureKey())
-                c.connectTimeout=15000;c.readTimeout=20000
-                val response=c.inputStream.bufferedReader().use{it.readText()}
-                c.disconnect()
-                val entries=JSONObject(response).getJSONArray("data")
-                val ids=mutableListOf<String>()
-                val names=mutableListOf<String>()
-                for(i in 0 until entries.length()){
-                    val v=entries.optJSONObject(i)?:continue
-                    val id=v.optString("id");if(id.isBlank())continue
-                    ids.add(id);names.add(v.optString("name",id)+" · "+id)
-                    if(ids.size>=80)break
-                }
-                runOnUiThread {
-                    if(ids.isEmpty())Toast.makeText(this,"图片模型目录为空",Toast.LENGTH_LONG).show()
-                    else AlertDialog.Builder(this).setTitle("选择生图模型 · 可能收费")
-                        .setItems(names.toTypedArray()){_,which->imagePrompt(ids[which],names[which])}
-                        .setNegativeButton("取消",null).show()
-                }
-            }catch(e:Exception){runOnUiThread { Toast.makeText(this,"图片模型加载失败："+e.message,Toast.LENGTH_LONG).show() }}
-        }
+        // The chat completions API is the documented OpenRouter image output route.
+        // Avoid the old /images/models endpoint which may be unavailable.
+        imagePrompt("openai/gpt-5-image","OpenAI 图像生成（OpenRouter）")
     }
     private fun imagePrompt(id:String,name:String){
         val prompt=EditText(this).apply{
@@ -573,11 +547,14 @@ class MainActivity : Activity() {
         thread {
             var conn:HttpURLConnection?=null
             try{
-                conn=URL("https://openrouter.ai/api/v1/images").openConnection() as HttpURLConnection
+                conn=URL("https://openrouter.ai/api/v1/chat/completions").openConnection() as HttpURLConnection
                 conn.requestMethod="POST";conn.doOutput=true;conn.connectTimeout=20000;conn.readTimeout=180000
                 conn.setRequestProperty("Authorization","Bearer $secret")
                 conn.setRequestProperty("Content-Type","application/json")
-                val payload=JSONObject().put("model",id).put("prompt",prompt).put("n",1)
+                val payload=JSONObject().put("model",id)
+                    .put("messages",JSONArray().put(JSONObject().put("role","user").put("content",prompt)))
+                    .put("modalities",JSONArray().put("image").put("text"))
+                    .put("stream",false)
                 conn.outputStream.use{it.write(payload.toString().toByteArray(Charsets.UTF_8))}
                 val status=conn.responseCode
                 if(status !in 200..299){
@@ -585,10 +562,14 @@ class MainActivity : Activity() {
                     throw Exception("HTTP $status · "+detail.take(300))
                 }
                 val response=JSONObject(conn.inputStream.bufferedReader().use{it.readText()})
-                val data=response.getJSONArray("data").getJSONObject(0)
-                val encoded=data.optString("b64_json")
-                if(encoded.isEmpty())throw Exception("接口未返回图片数据")
-                val bytes=Base64.decode(encoded.substringAfter("base64,",encoded),Base64.DEFAULT)
+                val message=response.getJSONArray("choices").getJSONObject(0).getJSONObject("message")
+                val images=message.optJSONArray("images")
+                if(images==null || images.length()==0)throw Exception("模型没有返回图片："+message.optString("content").take(160))
+                val item=images.getJSONObject(0)
+                val encoded=item.optJSONObject("image_url")?.optString("url")
+                    ?:item.optString("url")
+                if(!encoded.startsWith("data:image/"))throw Exception("模型返回了非内嵌图片，请检查图片响应格式")
+                val bytes=Base64.decode(encoded.substringAfter("base64,"),Base64.DEFAULT)
                 val bitmap=BitmapFactory.decodeByteArray(bytes,0,bytes.size)?:throw Exception("不支持的图片格式")
                 runOnUiThread{
                     progress.dismiss()
