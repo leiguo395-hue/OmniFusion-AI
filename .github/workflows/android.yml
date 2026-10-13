@@ -26,7 +26,18 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
-      - run: gradle :app:assembleDebug --no-daemon
+      - name: Restore stable signing key before builds
+        if: ${{ env.HAS_SIGNING_KEY == 'true' }}
+        env:
+          OMNI_KEYSTORE_B64: ${{ secrets.OMNI_KEYSTORE_B64 }}
+        run: printf '%s' "$OMNI_KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/omni-release.jks"
+      - name: Build debug APK
+        env:
+          OMNI_KEYSTORE_PATH: ${{ env.HAS_SIGNING_KEY == 'true' && format('{0}/omni-release.jks', runner.temp) || '' }}
+          OMNI_STORE_PASSWORD: ${{ secrets.OMNI_STORE_PASSWORD }}
+          OMNI_KEY_ALIAS: ${{ secrets.OMNI_KEY_ALIAS }}
+          OMNI_KEY_PASSWORD: ${{ secrets.OMNI_KEY_PASSWORD }}
+        run: gradle :app:assembleDebug --no-daemon
       - name: Inspect APK signing certificate
         run: $ANDROID_HOME/build-tools/35.0.0/apksigner verify --print-certs app/build/outputs/apk/debug/app-debug.apk
       - uses: actions/upload-artifact@v4
@@ -34,12 +45,6 @@ jobs:
           name: OmniFusion-debug-apk
           path: app/build/outputs/apk/debug/*.apk
 
-      - name: Prepare stable signing key
-        if: ${{ env.HAS_SIGNING_KEY == 'true' }}
-        env:
-          OMNI_KEYSTORE_B64: ${{ secrets.OMNI_KEYSTORE_B64 }}
-        run: |
-          printf '%s' "$OMNI_KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/omni-release.jks"
       - name: Build installable signed release
         if: ${{ env.HAS_SIGNING_KEY == 'true' }}
         env:
