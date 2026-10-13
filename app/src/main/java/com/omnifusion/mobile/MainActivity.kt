@@ -48,6 +48,7 @@ class MainActivity : Activity() {
     private val white get() = if(prefs.getBoolean("lightMode",false)) Color.rgb(25,32,48) else Color.rgb(244,246,255)
     private val dim get() = if(prefs.getBoolean("lightMode",false)) Color.rgb(77,87,108) else Color.rgb(154,164,193)
     private val prefs by lazy { getSharedPreferences("omni", MODE_PRIVATE) }
+    @Volatile private var routingCatalog: List<ModelRouter.Model> = emptyList()
     private var model = "openrouter/free"
     private var thinking = "high"
     private var assistantStyle = "balanced"
@@ -156,7 +157,11 @@ class MainActivity : Activity() {
                         if(id.isNotBlank())free.add(id)
                     }
                 }
-                runOnUiThread{verifiedFreeModels.addAll(free)}
+                val complete=ModelRouter.fromCatalog(arr)
+                runOnUiThread{
+                    routingCatalog=complete
+                    verifiedFreeModels.addAll(complete.filter{it.free}.map{it.id})
+                }
             }catch(_:Exception){/* Offline fallback remains OpenRouter free route. */}
         }
     }
@@ -370,24 +375,11 @@ class MainActivity : Activity() {
             }catch(e:Exception){runOnUiThread{Toast.makeText(this,"模型查询失败：${e.message}",Toast.LENGTH_LONG).show()}}
         }
     }
-    private fun autoModel(question:String):String{
-        // Local zero-token task router: only picks previously verified free model IDs.
-        // No hidden paid fallback. Selection is deterministic and auditable.
-        val available=verifiedFreeModels.toList()
-        if(available.isEmpty())return "openrouter/free"
-        val q=question.lowercase()
-        val preferred=when{
-            listOf("代码","编程","python","java","kotlin","bug","github","cad").any{q.contains(it)} ->
-                listOf("qwen/","deepseek/","google/")
-            listOf("分析","推理","数学","证明","逻辑","研究").any{q.contains(it)} ->
-                listOf("deepseek/","qwen/","google/")
-            else -> listOf("google/","deepseek/","qwen/")
-        }
-        for(prefix in preferred){
-            val candidate=available.firstOrNull{it.startsWith(prefix)}
-            if(candidate!=null)return candidate
-        }
-        return available.first()
+    private fun autoModel(question:String):String {
+        // Catalog-backed capability gate. Never send image requests to text-only models.
+        val task=ModelRouter.taskOf(question)
+        if(task==ModelRouter.Task.IMAGE_GEN) return "openrouter/free" // UI sends this to the dedicated image generator.
+        return ModelRouter.choose(task,routingCatalog) ?: "openrouter/free"
     }
     private fun ask(){
         if(busy)return
@@ -395,6 +387,11 @@ class MainActivity : Activity() {
         if(question.isEmpty())return
         val secret=secureKey()
         if(secret.isEmpty()){keyDialog();return}
+        if(ModelRouter.taskOf(question)==ModelRouter.Task.IMAGE_GEN){
+            // An explicit image request must not silently turn into a text-only answer.
+            imageCreator(question)
+            return
+        }
         val all=items()
         val recent=JSONArray()
         recent.put(JSONObject().put("role","system").put("content",instruction()))
@@ -510,18 +507,32 @@ class MainActivity : Activity() {
             box.addView(text(title+"   ↗",19f,white,true));box.addView(text(desc,13f,dim),lp(9))
             cards.addView(box,lp(12))
         }
-        cards.addView(text("图片使用 OpenRouter 图片 API，须有可用额度；生成价格依模型而异，确认后才会请求。视频生成尚未接入。",12f,dim),lp(17))
+        cards.addView(text("生图只允许图片输出模型。价格与额度依 OpenRouter 实时数据为准，确认后才会请求；视频生成尚未接入。",12f,dim),lp(17))
         val scroll=ScrollView(this);scroll.addView(cards);body.addView(scroll)
     }
-    private fun imageCreator(){
+    private fun imageCreator(prefill:String=""){
         if(secureKey().isBlank()){keyDialog();return}
-        // The chat completions API is the documented OpenRouter image output route.
-        // Avoid the old /images/models endpoint which may be unavailable.
-        imagePrompt("openai/gpt-5-image","OpenAI 图像生成（OpenRouter）")
+        // Present only models whose official metadata advertises image OUTPUT.
+        // Do not mistake image-input vision models for image generation.
+        val candidates=ModelRouter.imageModels(routingCatalog)
+        if(candidates.isEmpty()){
+            AlertDialog.Builder(this).setTitle("生图模型目录尚未就绪")
+                .setMessage("请确认网络、OpenRouter Key 与图片模型权限。稍后重试。不会自动改用文字模型，也不会产生费用。")
+                .setPositiveButton("重试"){_,_->warmFreeModelCatalog()}
+                .setNegativeButton("取消",null).show()
+            return
+        }
+        val labels=candidates.take(60).map { it.id+(if(it.free)" · 免费价格标记" else " · 可能付费") }.toTypedArray()
+        AlertDialog.Builder(this).setTitle("选择真正支持图片输出的模型")
+            .setItems(labels){_,index ->
+                val selected=candidates[index]
+                imagePrompt(selected.id,selected.id,prefill)
+            }.setNegativeButton("取消",null).show()
     }
-    private fun imagePrompt(id:String,name:String){
+    private fun imagePrompt(id:String,name:String,prefill:String=""){
         val prompt=EditText(this).apply{
             hint="详细描述你想生成的图片…";minLines=3;maxLines=6
+            if(prefill.isNotBlank())setText(prefill)
             setPadding(dp(18),dp(16),dp(18),dp(16))
         }
         AlertDialog.Builder(this).setTitle("图片生成 · "+name.take(40))
