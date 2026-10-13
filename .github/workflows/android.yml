@@ -6,6 +6,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      HAS_SIGNING_KEY: ${{ secrets.OMNI_KEYSTORE_B64 != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -27,3 +29,24 @@ jobs:
         with:
           name: OmniFusion-debug-apk
           path: app/build/outputs/apk/debug/*.apk
+
+      - name: Prepare stable signing key
+        if: ${{ env.HAS_SIGNING_KEY == 'true' }}
+        env:
+          OMNI_KEYSTORE_B64: ${{ secrets.OMNI_KEYSTORE_B64 }}
+        run: |
+          printf '%s' "$OMNI_KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/omni-release.jks"
+      - name: Build installable signed release
+        if: ${{ env.HAS_SIGNING_KEY == 'true' }}
+        env:
+          OMNI_KEYSTORE_PATH: ${{ runner.temp }}/omni-release.jks
+          OMNI_STORE_PASSWORD: ${{ secrets.OMNI_STORE_PASSWORD }}
+          OMNI_KEY_ALIAS: ${{ secrets.OMNI_KEY_ALIAS }}
+          OMNI_KEY_PASSWORD: ${{ secrets.OMNI_KEY_PASSWORD }}
+        run: gradle :app:assembleRelease --no-daemon
+      - name: Upload signed release
+        if: ${{ env.HAS_SIGNING_KEY == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: OmniFusion-signed-update-apk
+          path: app/build/outputs/apk/release/*.apk
