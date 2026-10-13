@@ -2,7 +2,7 @@ plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
 android {
  namespace = "com.omnifusion.mobile"
  compileSdk = 35
- defaultConfig { applicationId = "com.omnifusion.mobile"; minSdk = 26; targetSdk = 35; versionCode = 4; versionName = "1.1" }
+ defaultConfig { applicationId = "com.omnifusion.mobile"; minSdk = 26; targetSdk = 35; versionCode = 5; versionName = "2.0.0-beta1" }
  val releaseKey = System.getenv("OMNI_KEYSTORE_PATH")
  if (!releaseKey.isNullOrBlank()) {
    signingConfigs {
