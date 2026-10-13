@@ -9,6 +9,9 @@ import android.provider.MediaStore
 import android.content.ContentValues
 import android.os.Build
 import android.view.WindowManager
+import android.view.WindowInsets
+import android.widget.FrameLayout
+import com.example.liquidglass.LiquidGlassView
 import android.graphics.Typeface
 import android.os.Bundle
 import android.os.Handler
@@ -135,13 +138,16 @@ class MainActivity : Activity() {
     private fun navigate(page:Int){
         if(busy && page!=0){Toast.makeText(this,"回复中，请等待完成",Toast.LENGTH_SHORT).show();return}
         screen=page;window.statusBarColor=bg;window.navigationBarColor=bg
-        root=vertical().apply{setBackgroundColor(bg)}
+        root=vertical().apply{
+            background=GradientDrawable(GradientDrawable.Orientation.TL_BR,
+                intArrayOf(bg,accent and 0x00FFFFFF or 0xFF15152A.toInt(),bg))
+        }
         val top=horizontal().apply{setPadding(dp(20),dp(13),dp(18),dp(13))}
         top.addView(text("✦  OmniFusion",24f,white,true),LinearLayout.LayoutParams(0,-2,1f))
         top.addView(button("⚙"){navigate(3)})
         root.addView(top)
         body=vertical();root.addView(body,LinearLayout.LayoutParams(-1,0,1f))
-        val nav=horizontal().apply{setPadding(dp(8),dp(7),dp(8),dp(10));background=shape(panel)}
+        val nav=horizontal().apply{setPadding(dp(8),dp(7),dp(8),dp(10));background=null}
         val tabs=listOf("◉\n聊天","✧\n创作","▤\n历史","⚙\n设置")
         tabs.forEachIndexed{i,s->
             val b=text(s,12f,if(page==i)white else dim,page==i).apply{
@@ -152,7 +158,31 @@ class MainActivity : Activity() {
             }
             nav.addView(b,LinearLayout.LayoutParams(0,dp(56),1f))
         }
-        root.addView(nav);setContentView(root)
+        val glassNav=LiquidGlassView(this).apply {
+            enableDynamicBackground=true
+            addView(nav,FrameLayout.LayoutParams(-1,-2))
+        }
+        root.addView(glassNav)
+        setContentView(root)
+        if(android.os.Build.VERSION.SDK_INT>=30){
+            root.setOnApplyWindowInsetsListener{_,insets->
+                val ime=insets.getInsets(WindowInsets.Type.ime())
+                val keyboardOpen=insets.isVisible(WindowInsets.Type.ime()) && ime.bottom>dp(100)
+                glassNav.visibility=if(keyboardOpen)View.GONE else View.VISIBLE
+                root.post{
+                    if(root.parent!=null){
+                        val position=IntArray(2);root.getLocationOnScreen(position)
+                        val screenHeight=resources.displayMetrics.heightPixels
+                        val imeTop=screenHeight-ime.bottom
+                        val bottomOfRoot=position[1]+root.height
+                        val extra=if(keyboardOpen)(bottomOfRoot-imeTop).coerceAtLeast(0).coerceAtMost(ime.bottom) else 0
+                        if(root.paddingBottom!=extra)root.setPadding(0,0,0,extra)
+                    }
+                }
+                insets
+            }
+            root.requestApplyInsets()
+        }
         when(page){0->chatPage();1->createPage();2->historyPage();else->settingsPage()}
         body.alpha=0f;body.translationY=dp(9).toFloat()
         body.animate().alpha(1f).translationY(0f).setDuration(210).setInterpolator(DecelerateInterpolator()).start()
@@ -316,6 +346,25 @@ class MainActivity : Activity() {
             }catch(e:Exception){runOnUiThread{Toast.makeText(this,"模型查询失败：${e.message}",Toast.LENGTH_LONG).show()}}
         }
     }
+    private fun autoModel(question:String):String{
+        // Local zero-token task router: only picks previously verified free model IDs.
+        // No hidden paid fallback. Selection is deterministic and auditable.
+        val available=verifiedFreeModels.toList()
+        if(available.isEmpty())return "openrouter/free"
+        val q=question.lowercase()
+        val preferred=when{
+            listOf("代码","编程","python","java","kotlin","bug","github","cad").any{q.contains(it)} ->
+                listOf("qwen/","deepseek/","google/")
+            listOf("分析","推理","数学","证明","逻辑","研究").any{q.contains(it)} ->
+                listOf("deepseek/","qwen/","google/")
+            else -> listOf("google/","deepseek/","qwen/")
+        }
+        for(prefix in preferred){
+            val candidate=available.firstOrNull{it.startsWith(prefix)}
+            if(candidate!=null)return candidate
+        }
+        return available.first()
+    }
     private fun ask(){
         if(busy)return
         val question=input.text.toString().trim()
@@ -336,9 +385,9 @@ class MainActivity : Activity() {
         persist()
         bubble(question,true)
         input.setText("")
-        val answerView=bubble("● 正在连接模型…",false)
+        val answerView=bubble("● 正在连接 ${readableModel(if(model=="openrouter/free")autoModel(question) else model)}…",false)
         busy=true;send.isEnabled=false;send.alpha=.5f
-        val selected=model
+        val selected=if(model=="openrouter/free") autoModel(question) else model
         val thisRequest=++requestId
         thread{
             var connection:HttpURLConnection?=null
