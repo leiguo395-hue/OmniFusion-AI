@@ -160,25 +160,30 @@ class MainActivity : Activity() {
         }
         val glassNav=LiquidGlassView(this).apply {
             enableDynamicBackground=true
+            refractionHeight=dp(14).toFloat()
+            bevelWidth=dp(19).toFloat()
+            dispersionStrength=0.16f
+            setGlassTint(accent,0.12f)
             addView(nav,FrameLayout.LayoutParams(-1,-2))
         }
         root.addView(glassNav)
         setContentView(root)
-        if(android.os.Build.VERSION.SDK_INT>=30){
-            root.setOnApplyWindowInsetsListener{_,insets->
+        if(Build.VERSION.SDK_INT>=30){
+            // Draw the actual app background behind system bars, inset only interactive content.
+            root.setOnApplyWindowInsetsListener { _, insets ->
+                val status=insets.getInsets(WindowInsets.Type.statusBars())
+                val navBar=insets.getInsets(WindowInsets.Type.navigationBars())
                 val ime=insets.getInsets(WindowInsets.Type.ime())
-                val keyboardOpen=insets.isVisible(WindowInsets.Type.ime()) && ime.bottom>dp(100)
-                glassNav.visibility=if(keyboardOpen)View.GONE else View.VISIBLE
-                root.post{
-                    if(root.parent!=null){
-                        val position=IntArray(2);root.getLocationOnScreen(position)
-                        val screenHeight=resources.displayMetrics.heightPixels
-                        val imeTop=screenHeight-ime.bottom
-                        val bottomOfRoot=position[1]+root.height
-                        val extra=if(keyboardOpen)(bottomOfRoot-imeTop).coerceAtLeast(0).coerceAtMost(ime.bottom) else 0
-                        if(root.paddingBottom!=extra)root.setPadding(0,0,0,extra)
-                    }
-                }
+                val open=insets.isVisible(WindowInsets.Type.ime())
+                glassNav.visibility=if(open)View.GONE else View.VISIBLE
+                // adjustResize may already shrink the window. Avoid applying IME twice.
+                val rootHeight=root.rootView.height
+                val visible=android.graphics.Rect()
+                root.getWindowVisibleDisplayFrame(visible)
+                val alreadyResized=(rootHeight-visible.height())>dp(140)
+                val bottom=if(open && !alreadyResized)ime.bottom else if(open)0 else navBar.bottom
+                if(root.paddingTop!=status.top || root.paddingBottom!=bottom)
+                    root.setPadding(0,status.top,0,bottom)
                 insets
             }
             root.requestApplyInsets()
@@ -214,6 +219,7 @@ class MainActivity : Activity() {
     private fun chatPage(){
         val row=horizontal().apply{setPadding(dp(15),0,dp(15),dp(10))}
         row.addView(button("◆ ${readableModel(model).take(30)} ▾"){modelDialog()},LinearLayout.LayoutParams(0,-2,1f))
+        row.addView(button("🎨"){imageCreator()})
         row.addView(button("＋"){chats.put(newChat());current=chats.length()-1;persist();navigate(0)})
         body.addView(row)
         stream=ScrollView(this).apply{isFillViewport=true;isVerticalScrollBarEnabled=false;overScrollMode=View.OVER_SCROLL_NEVER}
@@ -495,6 +501,7 @@ class MainActivity : Activity() {
         thread {
             try {
                 val c=URL("https://openrouter.ai/api/v1/images/models").openConnection() as HttpURLConnection
+                c.setRequestProperty("Authorization","Bearer "+secureKey())
                 c.connectTimeout=15000;c.readTimeout=20000
                 val response=c.inputStream.bufferedReader().use{it.readText()}
                 c.disconnect()
@@ -555,8 +562,8 @@ class MainActivity : Activity() {
                     val detail=conn.errorStream?.bufferedReader()?.use{it.readText()}?:"未知错误"
                     throw Exception("HTTP $status · "+detail.take(300))
                 }
-                val data=JSONObject(conn.inputStream.bufferedReader().use{it.readText()})
-                    .getJSONArray("data").getJSONObject(0)
+                val response=JSONObject(conn.inputStream.bufferedReader().use{it.readText()})
+                val data=response.getJSONArray("data").getJSONObject(0)
                 val encoded=data.optString("b64_json")
                 if(encoded.isEmpty())throw Exception("接口未返回图片数据")
                 val bytes=Base64.decode(encoded.substringAfter("base64,",encoded),Base64.DEFAULT)
