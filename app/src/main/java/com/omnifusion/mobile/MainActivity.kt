@@ -63,6 +63,7 @@ class MainActivity : Activity() {
     private var modelNames=mutableMapOf<String,String>()
     private lateinit var root: LinearLayout
     private lateinit var body: LinearLayout
+    private val rateLimitUntil=mutableMapOf<String,Long>()
     private var routeStatus: TextView? = null
     private fun updateRouteStatus(value:String){ routeStatus?.text=value }
     private lateinit var stream: ScrollView
@@ -443,11 +444,8 @@ class MainActivity : Activity() {
         }
         val key=requireRouterKey() ?: return
         val task=ModelRouter.taskOf(prompt)
-        val ids=mutableListOf<String>()
-        repeat(2){
-            val candidate=ModelRouter.choose(task,routingCatalog,excluded=ids.toSet())
-            if(candidate!=null)ids.add(candidate)
-        }
+        val ids=ModelRouter.chooseDistinct(task,routingCatalog,2,
+            rateLimitUntil.filterValues{it>System.currentTimeMillis()}.keys)
         if(ids.size<2){
             AlertDialog.Builder(this).setTitle("交叉火力未启动")
                 .setMessage("至少需要两个支持当前任务的零价格模型。请检查网络和免费模型目录。不会改用付费模型。")
@@ -524,13 +522,9 @@ class MainActivity : Activity() {
         input.setText("")
         val locked=model!="openrouter/free"
         val candidates=if(locked)listOf(model) else {
-            val selected=mutableListOf<String>()
-            repeat(3){
-                val next=ModelRouter.choose(task,routingCatalog,excluded=selected.toSet())
-                if(next!=null) selected.add(next)
-            }
-            if(selected.isEmpty())selected.add("openrouter/free")
-            selected
+            ModelRouter.chooseDistinct(task,routingCatalog,3,
+                rateLimitUntil.filterValues{it>System.currentTimeMillis()}.keys)
+                .ifEmpty{listOf("openrouter/free")}
         }
         val started=System.currentTimeMillis()
         val answerView=bubble("◌ 正在连接 "+readableModel(candidates.first())+"…",false)
@@ -611,7 +605,13 @@ class MainActivity : Activity() {
                         // Also never override a manual lock or retry on invalid credentials.
                         val authError=lastError.contains("HTTP 401") || lastError.contains("HTTP 403") ||
                             lastError.contains("header value") || lastError.contains("Unexpected char")
-                        if(partial.isNotEmpty() || locked || authError || index==candidates.lastIndex)break
+                        val creditError=lastError.contains("HTTP 402")
+                        val throttled=lastError.contains("HTTP 429")
+                        if(throttled){
+                            val cooldown=System.currentTimeMillis()+120000L
+                            runOnUiThread{rateLimitUntil[id]=cooldown}
+                        }
+                        if(partial.isNotEmpty() || locked || authError || creditError || index==candidates.lastIndex)break
                         switchLog.add("↪ "+id+" 不可用："+lastError.take(80)+"，切换免费备用模型")
                         val switching=index+1
                         runOnUiThread{
