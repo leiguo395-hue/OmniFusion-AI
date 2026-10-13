@@ -134,6 +134,28 @@ class MainActivity : Activity() {
         if(chats.length()==0)chats.put(newChat())
         current=prefs.getInt("current",0).coerceIn(0,chats.length()-1)
         navigate(0)
+        warmFreeModelCatalog()
+    }
+    private fun warmFreeModelCatalog(){
+        // Fetch once at launch so AUTO does not silently remain a random router.
+        thread {
+            try{
+                val conn=URL("https://openrouter.ai/api/v1/models").openConnection() as HttpURLConnection
+                conn.connectTimeout=12000;conn.readTimeout=12000
+                val arr=JSONObject(conn.inputStream.bufferedReader().use{it.readText()}).getJSONArray("data")
+                conn.disconnect()
+                val free=mutableListOf<String>()
+                for(i in 0 until arr.length()){
+                    val x=arr.optJSONObject(i)?:continue
+                    val p=x.optJSONObject("pricing")?:continue
+                    if(p.optString("prompt").toDoubleOrNull()==0.0 && p.optString("completion").toDoubleOrNull()==0.0){
+                        val id=x.optString("id")
+                        if(id.isNotBlank())free.add(id)
+                    }
+                }
+                runOnUiThread{verifiedFreeModels.addAll(free)}
+            }catch(_:Exception){/* Offline fallback remains OpenRouter free route. */}
+        }
     }
     private fun navigate(page:Int){
         if(busy && page!=0){Toast.makeText(this,"回复中，请等待完成",Toast.LENGTH_SHORT).show();return}
