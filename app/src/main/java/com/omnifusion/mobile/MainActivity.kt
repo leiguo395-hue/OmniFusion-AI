@@ -198,7 +198,15 @@ class MainActivity : Activity() {
         val top=horizontal().apply{setPadding(dp(20),dp(13),dp(18),dp(13))}
         top.addView(text("✦  OmniFusion",24f,white,true),LinearLayout.LayoutParams(0,-2,1f))
         top.addView(button("⚙"){navigate(3)})
-        root.addView(top)
+        val glassTop=LiquidGlassView(this).apply {
+            enableDynamicBackground=true
+            refractionHeight=dp(10).toFloat()
+            bevelWidth=dp(12).toFloat()
+            dispersionStrength=0.11f
+            setGlassTint(accent,0.08f)
+            addView(top,FrameLayout.LayoutParams(-1,-2))
+        }
+        root.addView(glassTop)
         body=vertical();root.addView(body,LinearLayout.LayoutParams(-1,0,1f))
         val nav=horizontal().apply{setPadding(dp(8),dp(7),dp(8),dp(10));background=null}
         val tabs=listOf("◉\n聊天","✧\n创作","▤\n历史","⚙\n设置")
