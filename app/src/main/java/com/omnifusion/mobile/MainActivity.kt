@@ -63,7 +63,7 @@ class MainActivity : Activity() {
     private var modelNames=mutableMapOf<String,String>()
     private lateinit var root: LinearLayout
     private lateinit var body: LinearLayout
-    private val rateLimitUntil=mutableMapOf<String,Long>()
+    private val rateLimitUntil=java.util.concurrent.ConcurrentHashMap<String,Long>()
     private var routeStatus: TextView? = null
     private fun updateRouteStatus(value:String){ routeStatus?.text=value }
     private lateinit var stream: ScrollView
@@ -565,7 +565,18 @@ class MainActivity : Activity() {
                         val code=connection.responseCode
                         if(code !in 200..299) {
                             val detail=connection.errorStream?.bufferedReader()?.use{it.readText()} ?: "未提供错误详情"
-                            throw Exception("HTTP $code: "+detail.take(140))
+                            // Never dump account metadata or full provider JSON into the chat transcript.
+                            val serverMessage=try{
+                                JSONObject(detail).optJSONObject("error")?.optString("message") ?: ""
+                            }catch(_:Exception){""}
+                            val reason=when(code){
+                                402 -> "账户额度不足或免费调用资格受限；请检查 OpenRouter 账号和额度"
+                                429 -> "模型提供商限流；该模型将暂时进入冷却期"
+                                401 -> "API Key 无效或已失效"
+                                403 -> "账号或模型权限不足"
+                                else -> serverMessage.take(110).ifBlank{"请求被服务商拒绝"}
+                            }
+                            throw Exception("HTTP $code: "+reason)
                         }
                         var streamError=""
                         connection.inputStream.bufferedReader().use{reader->
@@ -609,7 +620,7 @@ class MainActivity : Activity() {
                         val throttled=lastError.contains("HTTP 429")
                         if(throttled){
                             val cooldown=System.currentTimeMillis()+120000L
-                            runOnUiThread{rateLimitUntil[id]=cooldown}
+                            rateLimitUntil[id]=cooldown
                         }
                         if(partial.isNotEmpty() || locked || authError || creditError || index==candidates.lastIndex)break
                         switchLog.add("↪ "+id+" 不可用："+lastError.take(80)+"，切换免费备用模型")
@@ -633,7 +644,10 @@ class MainActivity : Activity() {
                             "任务："+task+" · 模型："+usedModel+" · 耗时："+elapsed+"ms"+
                             if(switchLog.isEmpty())"" else "\\n"+switchLog.joinToString("\\n")
                         answerView.text=if(finalAnswer!=null)finalAnswer+explanation else
-                            "⚠ 当前模型请求失败："+lastError+"\\n"+switchLog.joinToString("\\n")
+                            "⚠ 请求未完成："+lastError+
+                            if(lastError.contains("HTTP 402"))"\\n请检查 OpenRouter 账号额度和免费模型资格；不会自动启用付费模型。" else
+                            if(lastError.contains("HTTP 429"))"\\n免费模型暂时限流，请稍后重试。" else
+                            if(switchLog.isEmpty())"" else "\\n"+switchLog.joinToString("\\n")
                         all.put(JSONObject().put("role","assistant").put("content",
                             finalAnswer ?: "请求未完成："+lastError)
                             .put("reason",reasoning))
