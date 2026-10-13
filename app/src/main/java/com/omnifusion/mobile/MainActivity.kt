@@ -1,15 +1,13 @@
 package com.omnifusion.mobile
 
-import android.app.Activity
-import android.app.AlertDialog
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
+import android.app.*
+import android.content.*
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.text.InputType
+import android.util.Base64
 import android.view.Gravity
 import android.view.View
 import android.widget.*
@@ -17,190 +15,343 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
+import java.security.KeyStore
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.spec.GCMParameterSpec
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
 import kotlin.concurrent.thread
 
 class MainActivity : Activity() {
-    private val bg = Color.rgb(15, 18, 29)
-    private val panel = Color.rgb(28, 33, 49)
-    private val muted = Color.rgb(160, 169, 191)
-    private val accent = Color.rgb(106, 130, 255)
-    private lateinit var messagesView: LinearLayout
-    private lateinit var scroll: ScrollView
-    private lateinit var prompt: EditText
-    private lateinit var send: Button
-    private lateinit var modelPicker: Spinner
-    private lateinit var status: TextView
-    private val history = JSONArray()
-    private val models = arrayOf("自动免费 · OpenRouter", "手动填写模型 ID")
-    private var selectedModel = "openrouter/free"
+    private val bg = Color.rgb(11,14,24)
+    private val panel = Color.rgb(27,33,50)
+    private val accent = Color.rgb(120,111,247)
+    private val white = Color.rgb(244,246,255)
+    private val dim = Color.rgb(154,164,193)
+    private val prefs by lazy { getSharedPreferences("omni", MODE_PRIVATE) }
+    private var model = "openrouter/free"
+    private var chats = JSONArray()
+    private var current = 0
     private var busy = false
-
-    private fun dp(n: Int) = (n * resources.displayMetrics.density).toInt()
-    private fun rounded(color: Int, radius: Int = 18): GradientDrawable =
-        GradientDrawable().apply { setColor(color); cornerRadius = dp(radius).toFloat() }
-    private fun label(text: String, size: Float = 15f, color: Int = Color.WHITE) =
-        TextView(this).apply { this.text = text; textSize = size; setTextColor(color); setTextIsSelectable(true) }
-    private fun copy(text: String) {
-        (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
-            .setPrimaryClip(ClipData.newPlainText("OmniFusion", text))
-        Toast.makeText(this, "已复制", Toast.LENGTH_SHORT).show()
+    private var screen = 0
+    private lateinit var root: LinearLayout
+    private lateinit var body: LinearLayout
+    private lateinit var stream: ScrollView
+    private lateinit var transcript: LinearLayout
+    private lateinit var input: EditText
+    private lateinit var send: TextView
+    private fun dp(v:Int) = (v*resources.displayMetrics.density).toInt()
+    private fun shape(color:Int, radius:Int=18) = GradientDrawable().apply {setColor(color);cornerRadius=dp(radius).toFloat()}
+    private fun text(s:String, size:Float=15f, color:Int=white, bold:Boolean=false) = TextView(this).apply {
+        setText(s);textSize=size;setTextColor(color);if(bold)setTypeface(null,Typeface.BOLD);gravity=Gravity.CENTER_VERTICAL;setTextIsSelectable(true)
     }
-    private fun apiKey(): String = getSharedPreferences("private", MODE_PRIVATE).getString("key", "") ?: ""
-    private fun editKey() {
-        val box = EditText(this).apply {
-            hint = "sk-or-..."
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-            setText(apiKey())
-            setPadding(dp(18), dp(12), dp(18), dp(12))
+    private fun vertical()=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL}
+    private fun horizontal()=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL;gravity=Gravity.CENTER_VERTICAL}
+    private fun lp(top:Int=0)=LinearLayout.LayoutParams(-1,-2).apply{topMargin=dp(top)}
+    private fun button(s:String, action:()->Unit)=text(s,14f,white,true).apply{
+        gravity=Gravity.CENTER;setPadding(dp(13),dp(11),dp(13),dp(11));background=shape(panel,14);setOnClickListener{action()}
+    }
+    private fun copy(s:String){
+        (getSystemService(CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("OmniFusion",s))
+        Toast.makeText(this,"已复制",Toast.LENGTH_SHORT).show()
+    }
+    private fun secureKey():String {
+        val value=prefs.getString("encryptedKey",null)
+        if(value!=null)return try{
+            val data=Base64.decode(value,Base64.NO_WRAP)
+            val store=KeyStore.getInstance("AndroidKeyStore").apply{load(null)}
+            val c=Cipher.getInstance("AES/GCM/NoPadding")
+            c.init(Cipher.DECRYPT_MODE,store.getKey("omniKey",null),GCMParameterSpec(128,data.copyOfRange(0,12)))
+            String(c.doFinal(data.copyOfRange(12,data.size)))
+        }catch(_:Exception){""}
+        val old=getSharedPreferences("private",MODE_PRIVATE).getString("key","") ?: ""
+        if(old.isNotBlank())storeKey(old)
+        return old
+    }
+    private fun storeKey(value:String){
+        try{
+            val store=KeyStore.getInstance("AndroidKeyStore").apply{load(null)}
+            if(!store.containsAlias("omniKey")){
+                val gen=KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES,"AndroidKeyStore")
+                gen.init(KeyGenParameterSpec.Builder("omniKey",KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
+                    .setBlockModes(KeyProperties.BLOCK_MODE_GCM).setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE).build())
+                gen.generateKey()
+            }
+            val c=Cipher.getInstance("AES/GCM/NoPadding")
+            c.init(Cipher.ENCRYPT_MODE,store.getKey("omniKey",null))
+            prefs.edit().putString("encryptedKey",Base64.encodeToString(c.iv+c.doFinal(value.toByteArray()),Base64.NO_WRAP)).apply()
+            getSharedPreferences("private",MODE_PRIVATE).edit().remove("key").apply()
+        }catch(e:Exception){Toast.makeText(this,"密钥保存失败：${e.message}",Toast.LENGTH_LONG).show()}
+    }
+    private fun keyDialog(){
+        val edit=EditText(this).apply{hint="sk-or-…";setText(secureKey());inputType=InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD}
+        val box=vertical().apply{setPadding(dp(22),0,dp(22),0);addView(edit)}
+        AlertDialog.Builder(this).setTitle("🔐 OpenRouter API Key").setMessage("使用 Android Keystore 加密保存在本机，不会提交到 GitHub。")
+            .setView(box).setPositiveButton("保存"){_,_->storeKey(edit.text.toString().trim());navigate(screen)}
+            .setNegativeButton("取消",null).show()
+    }
+    private fun newChat()=JSONObject().put("title","新对话").put("items",JSONArray())
+    private fun items()=chats.getJSONObject(current).getJSONArray("items")
+    private fun persist(){prefs.edit().putString("chats",chats.toString()).putInt("current",current).apply()}
+    override fun onCreate(savedInstanceState:Bundle?){
+        super.onCreate(savedInstanceState);window.statusBarColor=bg;window.navigationBarColor=bg
+        model=prefs.getString("model","openrouter/free") ?: "openrouter/free"
+        chats=try{JSONArray(prefs.getString("chats","[]"))}catch(_:Exception){JSONArray()}
+        if(chats.length()==0)chats.put(newChat())
+        current=prefs.getInt("current",0).coerceIn(0,chats.length()-1)
+        navigate(0)
+    }
+    private fun navigate(page:Int){
+        screen=page;root=vertical().apply{setBackgroundColor(bg)}
+        val top=horizontal().apply{setPadding(dp(20),dp(13),dp(18),dp(13))}
+        top.addView(text("✦  OmniFusion",24f,white,true),LinearLayout.LayoutParams(0,-2,1f))
+        top.addView(button("⚙"){navigate(3)})
+        root.addView(top)
+        body=vertical();root.addView(body,LinearLayout.LayoutParams(-1,0,1f))
+        val nav=horizontal().apply{setPadding(dp(8),dp(7),dp(8),dp(10));background=shape(panel)}
+        val tabs=listOf("◉\n聊天","✧\n创作","▤\n历史","⚙\n设置")
+        tabs.forEachIndexed{i,s->
+            val b=text(s,12f,if(page==i)white else dim,page==i).apply{
+                gravity=Gravity.CENTER;background=if(page==i)shape(Color.rgb(55,58,94),12)else null
+                setOnClickListener{navigate(i)}
+            }
+            nav.addView(b,LinearLayout.LayoutParams(0,dp(56),1f))
         }
-        AlertDialog.Builder(this).setTitle("OpenRouter API Key")
-            .setMessage("仅保存在本机应用私有存储，不会上传到 GitHub。请勿分享密钥。")
-            .setView(box).setNegativeButton("取消", null)
-            .setPositiveButton("保存") { _, _ ->
-                getSharedPreferences("private", MODE_PRIVATE).edit().putString("key", box.text.toString().trim()).apply()
-                status.text = if (apiKey().isBlank()) "未配置密钥" else "已配置密钥 · 免费优先"
+        root.addView(nav);setContentView(root)
+        when(page){0->chatPage();1->createPage();2->historyPage();else->settingsPage()}
+    }
+    private fun heading(title:String,description:String){
+        body.addView(text(title,27f,white,true).apply{setPadding(dp(19),dp(10),dp(19),0)})
+        body.addView(text(description,13f,dim).apply{setPadding(dp(19),dp(6),dp(19),dp(19))})
+    }
+    private fun chatPage(){
+        val row=horizontal().apply{setPadding(dp(15),0,dp(15),dp(10))}
+        row.addView(button("◆ ${model.substringAfterLast('/')} ▾"){modelDialog()},LinearLayout.LayoutParams(0,-2,1f))
+        row.addView(button("＋"){chats.put(newChat());current=chats.length()-1;persist();navigate(0)})
+        body.addView(row)
+        stream=ScrollView(this).apply{fillViewport=true}
+        transcript=vertical().apply{setPadding(dp(17),dp(10),dp(17),dp(15))}
+        stream.addView(transcript);body.addView(stream,LinearLayout.LayoutParams(-1,0,1f))
+        if(items().length()==0){
+            transcript.addView(text("你的灵感，从这里开始。",25f,white,true),lp(38))
+            transcript.addView(text("提问、创作、编程、学习。选择适合的免费云端模型。",15f,dim),lp(15))
+        }else redraw()
+        val bar=horizontal().apply{
+            background=shape(panel,21);setPadding(dp(7),dp(7),dp(7),dp(7))
+        }
+        input=EditText(this).apply{
+            hint="向 OmniFusion 提问…";setHintTextColor(dim);setTextColor(white)
+            background=null;textSize=15f;minLines=1;maxLines=5
+            inputType=InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+        }
+        bar.addView(input,LinearLayout.LayoutParams(0,-2,1f))
+        send=button("➤"){ask()}
+        bar.addView(send)
+        body.addView(bar,LinearLayout.LayoutParams(-1,-2).apply{setMargins(dp(15),dp(8),dp(15),dp(13))})
+    }
+    private fun bubble(value:String,me:Boolean,reason:String=""):TextView{
+        val wrapper=vertical().apply{setPadding(0,dp(8),0,dp(10))}
+        wrapper.addView(text(if(me)"你" else "✦ OmniFusion",12f,dim),lp(0))
+        if(!me&&reason.isNotBlank()){
+            wrapper.addView(button("查看模型返回的推理内容 ▾"){
+                AlertDialog.Builder(this).setTitle("模型实际提供的推理内容").setMessage(reason)
+                    .setPositiveButton("复制"){_,_->copy(reason)}.setNegativeButton("关闭",null).show()
+            },lp(6))
+        }
+        val message=text(value,15f).apply{
+            setPadding(dp(15),dp(12),dp(15),dp(12))
+            background=shape(if(me)Color.rgb(65,62,137)else panel,17)
+            setOnLongClickListener{copy(this.text.toString());true}
+        }
+        wrapper.addView(message,lp(8))
+        wrapper.addView(text("复制 ⧉",12f,dim).apply{
+            setPadding(dp(9),dp(7),0,0);setOnClickListener{copy(message.text.toString())}
+        })
+        transcript.addView(wrapper)
+        stream.post{stream.fullScroll(View.FOCUS_DOWN)}
+        return message
+    }
+    private fun redraw(){
+        transcript.removeAllViews()
+        val all=items()
+        for(i in 0 until all.length()){
+            val entry=all.optJSONObject(i)?:continue
+            bubble(entry.optString("content"),entry.optString("role")=="user",entry.optString("reason",""))
+        }
+    }
+    private fun modelDialog(){
+        AlertDialog.Builder(this).setTitle("模型中心")
+            .setItems(arrayOf("✦ OpenRouter 自动免费","☁ 查询实时免费模型","✎ 手动输入模型 ID")){_,choice->
+                when(choice){
+                    0->choose("openrouter/free")
+                    1->freeModels()
+                    2->{
+                        val field=EditText(this).apply{setText(model);setSingleLine()}
+                        AlertDialog.Builder(this).setTitle("模型 ID").setView(field)
+                            .setPositiveButton("应用"){_,_->choose(field.text.toString().trim())}.setNegativeButton("取消",null).show()
+                    }
+                }
             }.show()
     }
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        window.statusBarColor = bg
-        window.navigationBarColor = bg
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(8), dp(16), dp(12))
-            setBackgroundColor(bg)
-        }
-        val header = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        val titleColumn = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        titleColumn.addView(label("✦ OmniFusion", 23f).apply { setTypeface(null, Typeface.BOLD) })
-        status = label(if (apiKey().isBlank()) "未配置密钥" else "已配置密钥 · 免费优先", 12f, muted)
-        titleColumn.addView(status)
-        header.addView(titleColumn, LinearLayout.LayoutParams(0, -2, 1f))
-        val settings = Button(this).apply { text = "密钥"; setOnClickListener { editKey() } }
-        header.addView(settings)
-        root.addView(header)
-        val modelRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        modelPicker = Spinner(this)
-        modelPicker.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, models)
-        modelPicker.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
-            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
-            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
-                if (position == 0) selectedModel = "openrouter/free"
-                else {
-                    val edit = EditText(this@MainActivity).apply { setText(selectedModel); setSingleLine(true) }
-                    AlertDialog.Builder(this@MainActivity).setTitle("模型 ID")
-                        .setView(edit).setNegativeButton("取消", null)
-                        .setPositiveButton("确定") { _, _ -> selectedModel = edit.text.toString().trim() }.show()
+    private fun choose(id:String){if(id.isNotBlank()){model=id;prefs.edit().putString("model",id).apply();navigate(0)}}
+    private fun freeModels(){
+        Toast.makeText(this,"查询免费模型中…",Toast.LENGTH_SHORT).show()
+        thread{
+            try{
+                val conn=URL("https://openrouter.ai/api/v1/models").openConnection() as HttpURLConnection
+                conn.connectTimeout=15000;conn.readTimeout=20000
+                val arr=JSONObject(conn.inputStream.bufferedReader().use{it.readText()}).getJSONArray("data")
+                conn.disconnect()
+                val models=mutableListOf<Pair<String,String>>()
+                for(i in 0 until arr.length()){
+                    val x=arr.getJSONObject(i);val cost=x.optJSONObject("pricing")?:continue
+                    if(cost.optString("prompt")=="0"&&cost.optString("completion")=="0")
+                        models.add(x.optString("name") to x.optString("id"))
                 }
-            }
+                models.sortBy{it.second};val shown=models.take(70)
+                runOnUiThread{
+                    if(shown.isEmpty())Toast.makeText(this,"暂未找到可用免费模型",Toast.LENGTH_LONG).show()
+                    else AlertDialog.Builder(this).setTitle("实时免费模型")
+                        .setItems(shown.map{it.first+" · "+it.second}.toTypedArray()){_,i->choose(shown[i].second)}
+                        .setNegativeButton("取消",null).show()
+                }
+            }catch(e:Exception){runOnUiThread{Toast.makeText(this,"模型列表失败：${e.message}",Toast.LENGTH_LONG).show()}}
         }
-        modelRow.addView(modelPicker, LinearLayout.LayoutParams(0, dp(52), 1f))
-        modelRow.addView(Button(this).apply {
-            text = "新对话"
-            setOnClickListener {
-                historyClear()
-                messagesView.removeAllViews()
-                addBubble("新的对话开始啦。长按消息可复制。", false)
-            }
-        })
-        root.addView(modelRow)
-        scroll = ScrollView(this).apply { fillViewport = true }
-        messagesView = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, dp(12), 0, dp(12)) }
-        scroll.addView(messagesView)
-        root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
-        addBubble("你好！我是 OmniFusion 测试版。支持长按复制、上下文聊天和免费模型调用。", false)
-        val composer = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.BOTTOM
-            background = rounded(panel, 22)
-            setPadding(dp(10), dp(6), dp(8), dp(6))
-        }
-        prompt = EditText(this).apply {
-            hint = "给 OmniFusion 发消息…"
-            setHintTextColor(muted)
-            setTextColor(Color.WHITE)
-            textSize = 15f
-            minLines = 1
-            maxLines = 5
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
-            background = null
-        }
-        composer.addView(prompt, LinearLayout.LayoutParams(0, -2, 1f))
-        send = Button(this).apply { text = "➤"; setOnClickListener { sendMessage() } }
-        composer.addView(send)
-        root.addView(composer)
-        setContentView(root)
     }
-    private fun historyClear() { while (history.length() > 0) history.remove(0) }
-    private fun addBubble(message: String, user: Boolean) {
-        val outer = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = if (user) Gravity.END else Gravity.START
-            setPadding(0, dp(7), 0, dp(7))
+    private fun ask(){
+        if(busy)return
+        val question=input.text.toString().trim();if(question.isEmpty())return
+        val secret=secureKey();if(secret.isEmpty()){keyDialog();return}
+        val messages=JSONArray();val all=items()
+        for(i in maxOf(0,all.length()-20) until all.length()){
+            val item=all.optJSONObject(i)?:continue
+            messages.put(JSONObject().put("role",item.optString("role")).put("content",item.optString("content")))
         }
-        val tag = label(if (user) "你" else "✦ OmniFusion", 12f, muted)
-        outer.addView(tag)
-        val text = label(message, 16f).apply {
-            setPadding(dp(14), dp(12), dp(14), dp(12))
-            background = rounded(if (user) accent else panel)
-            setOnLongClickListener { copy(message); true }
-        }
-        outer.addView(text, LinearLayout.LayoutParams(-2, -2).apply { width = resources.displayMetrics.widthPixels - dp(70) })
-        val copyButton = label("复制", 12f, muted).apply {
-            setPadding(dp(8), dp(5), dp(8), 0)
-            setOnClickListener { copy(message) }
-        }
-        outer.addView(copyButton)
-        messagesView.addView(outer)
-        scroll.post { scroll.fullScroll(View.FOCUS_DOWN) }
-    }
-    private fun sendMessage() {
-        if (busy) return
-        val question = prompt.text.toString().trim()
-        if (question.isBlank()) return
-        val key = apiKey()
-        if (key.isBlank()) { editKey(); return }
-        if (selectedModel.isBlank()) { Toast.makeText(this, "请填写模型 ID", Toast.LENGTH_SHORT).show(); return }
-        val requestMessages = JSONArray(history.toString())
-        requestMessages.put(JSONObject().put("role", "user").put("content", question))
-        prompt.setText("")
-        addBubble(question, true)
-        busy = true
-        send.isEnabled = false
-        status.text = "正在思考…"
-        thread {
-            var conn: HttpURLConnection? = null
-            try {
-                conn = URL("https://openrouter.ai/api/v1/chat/completions").openConnection() as HttpURLConnection
-                conn.requestMethod = "POST"
-                conn.connectTimeout = 20000
-                conn.readTimeout = 120000
-                conn.doOutput = true
-                conn.setRequestProperty("Content-Type", "application/json")
-                conn.setRequestProperty("Authorization", "Bearer $key")
-                val payload = JSONObject().put("model", selectedModel).put("messages", requestMessages).toString()
-                conn.outputStream.use { it.write(payload.toByteArray(Charsets.UTF_8)) }
-                val code = conn.responseCode
-                val stream = if (code in 200..299) conn.inputStream else conn.errorStream
-                val response = stream.bufferedReader().use { it.readText() }
-                if (code !in 200..299) throw Exception("HTTP $code: ${response.take(350)}")
-                val answer = JSONObject(response).getJSONArray("choices").getJSONObject(0)
-                    .getJSONObject("message").optString("content", "").ifBlank { "模型没有返回文字。" }
-                runOnUiThread {
-                    history.put(JSONObject().put("role", "user").put("content", question))
-                    history.put(JSONObject().put("role", "assistant").put("content", answer))
-                    addBubble(answer, false)
+        messages.put(JSONObject().put("role","user").put("content",question))
+        all.put(JSONObject().put("role","user").put("content",question))
+        if(all.length()==1)chats.getJSONObject(current).put("title",question.take(24))
+        persist();bubble(question,true);input.setText("")
+        val result=bubble("正在连接模型…",false)
+        busy=true;send.isEnabled=false;send.alpha=.5f
+        val selected=model
+        thread{
+            var connection:HttpURLConnection?=null
+            try{
+                connection=URL("https://openrouter.ai/api/v1/chat/completions").openConnection() as HttpURLConnection
+                connection.requestMethod="POST";connection.doOutput=true
+                connection.connectTimeout=20000;connection.readTimeout=120000
+                connection.setRequestProperty("Authorization","Bearer "+secret)
+                connection.setRequestProperty("Content-Type","application/json")
+                connection.setRequestProperty("HTTP-Referer","https://github.com/leiguo395-hue/OmniFusion-AI")
+                connection.setRequestProperty("X-Title","OmniFusion AI")
+                val payload=JSONObject().put("model",selected).put("stream",true).put("messages",messages)
+                connection.outputStream.use{it.write(payload.toString().toByteArray(Charsets.UTF_8))}
+                val status=connection.responseCode
+                if(status !in 200..299){
+                    val error=connection.errorStream?.bufferedReader()?.use{it.readText()}?:""
+                    throw Exception("HTTP $status: "+error.take(340))
                 }
-            } catch (e: Exception) {
-                runOnUiThread { addBubble("请求失败：${e.message}", false) }
-            } finally {
-                conn?.disconnect()
-                runOnUiThread {
-                    busy = false
-                    send.isEnabled = true
-                    status.text = "免费模型 · ${selectedModel}"
+                val answer=StringBuilder();val reasoning=StringBuilder()
+                connection.inputStream.bufferedReader().useLines{lines->
+                    for(line in lines){
+                        if(!line.startsWith("data: "))continue
+                        val json=line.removePrefix("data: ").trim()
+                        if(json=="[DONE]")break
+                        try{
+                            val delta=JSONObject(json).optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("delta")
+                            val part=delta?.optString("content","")?:""
+                            val think=delta?.optString("reasoning","")?:""
+                            if(part!="null")answer.append(part)
+                            if(think!="null")reasoning.append(think)
+                            val preview=answer.toString().ifBlank{"模型正在处理请求…"}
+                            runOnUiThread{result.text=preview}
+                        }catch(_:Exception){}
+                    }
                 }
+                val final=answer.toString().ifBlank{"模型没有返回文字"}
+                all.put(JSONObject().put("role","assistant").put("content",final).put("reason",reasoning.toString().take(12000)))
+                runOnUiThread{persist();redraw()}
+            }catch(e:Exception){
+                runOnUiThread{
+                    result.text="请求失败：${e.message}"
+                    all.put(JSONObject().put("role","assistant").put("content",result.text.toString()))
+                    persist()
+                }
+            }finally{
+                connection?.disconnect()
+                runOnUiThread{busy=false;send.isEnabled=true;send.alpha=1f}
             }
         }
+    }
+    private fun createPage(){
+        heading("创作工作台 ✨","从灵感到专业提示词。媒体生成需另接可用的 API。")
+        val cards=vertical().apply{setPadding(dp(18),0,dp(18),dp(10))}
+        val choices=listOf(
+            Triple("✧  视觉创意","生成摄影、插画、海报的中英双语提示词","请作为专业视觉艺术总监，把我的想法扩展成高质量生图提示词，含构图、风格、镜头、光照、色彩和负面提示词："),
+            Triple("▣  视频分镜","规划视频的镜头、画面和运镜","请作为电影导演，把我的构想写成完整短视频分镜表，含秒数、景别、机位、运镜、主体、氛围、声音和视频模型提示词："),
+            Triple("⌘  编程工作台","代码、调试、工程架构与分析","请作为资深软件工程师解决这个问题，提供可运行代码及测试方法："),
+            Triple("◈  深度分析","复杂问题拆解、多角度推理与建议","请把以下复杂问题分解成假设、关键证据、方案对比、风险和最终建议；对于不确定的结论明确标注：")
+        )
+        choices.forEach{(title,desc,prefix)->
+            val box=vertical().apply{
+                setPadding(dp(18),dp(18),dp(18),dp(18));background=shape(panel,20)
+                setOnClickListener{navigate(0);input.setText(prefix);input.setSelection(input.length())}
+            }
+            box.addView(text(title+"   ↗",19f,white,true));box.addView(text(desc,13f,dim),lp(9))
+            cards.addView(box,lp(12))
+        }
+        cards.addView(text("说明：此版本不假装拥有尚未接入的生图或视频生成 API。",12f,dim),lp(17))
+        val scroll=ScrollView(this);scroll.addView(cards);body.addView(scroll)
+    }
+    private fun historyPage(){
+        heading("聊天档案 ▤","会话保存在本机，点击继续，长按删除。")
+        val cards=vertical().apply{setPadding(dp(18),0,dp(18),dp(18))}
+        for(i in chats.length()-1 downTo 0){
+            val item=chats.getJSONObject(i)
+            val b=vertical().apply{
+                setPadding(dp(16),dp(14),dp(16),dp(14));background=shape(panel)
+                setOnClickListener{current=i;persist();navigate(0)}
+                setOnLongClickListener{
+                    AlertDialog.Builder(this@MainActivity).setTitle("删除这段聊天？")
+                        .setPositiveButton("删除"){_,_->
+                            chats.remove(i);if(chats.length()==0)chats.put(newChat())
+                            current=0;persist();navigate(2)
+                        }.setNegativeButton("取消",null).show();true
+                }
+            }
+            b.addView(text("◉  "+item.optString("title","新对话"),16f,white,true))
+            b.addView(text("${item.getJSONArray("items").length()} 条消息 · 点击打开",12f,dim),lp(7))
+            cards.addView(b,lp(10))
+        }
+        val sc=ScrollView(this);sc.addView(cards);body.addView(sc)
+    }
+    private fun settingsPage(){
+        heading("控制中心 ⚙","所有模型、密钥和聊天数据都由你管理。")
+        val box=vertical().apply{setPadding(dp(18),0,dp(18),dp(16))}
+        box.addView(button(if(secureKey().isEmpty())"🔐  添加 API Key" else "🔐  修改 API Key"){keyDialog()},lp(8))
+        box.addView(button("◆  模型：${model.substringAfterLast('/')}"){modelDialog()},lp(12))
+        box.addView(text("数据管理",20f,white,true),lp(28))
+        box.addView(button("↗  导出全部对话"){
+            val sb=StringBuilder("OmniFusion AI 聊天导出\n\n")
+            for(i in 0 until chats.length()){
+                val c=chats.getJSONObject(i);sb.append("# "+c.optString("title")+"\n")
+                val messages=c.getJSONArray("items")
+                for(j in 0 until messages.length()){
+                    val m=messages.getJSONObject(j)
+                    sb.append(m.optString("role")+": "+m.optString("content")+"\n\n")
+                }
+            }
+            startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply{
+                type="text/plain";putExtra(Intent.EXTRA_TEXT,sb.toString())
+            },"分享聊天记录"))
+        },lp(12))
+        box.addView(button("⌫  清空所有历史"){
+            AlertDialog.Builder(this).setTitle("确定删除所有对话？")
+                .setPositiveButton("确定"){_,_->chats=JSONArray().put(newChat());current=0;persist();navigate(3)}
+                .setNegativeButton("取消",null).show()
+        },lp(12))
+        box.addView(text("V1.0 · OmniFusion\n\n支持：流式文字、免费模型目录、聊天存储、加密密钥、复制与多页面。\n\n仅显示 API 真正返回的推理内容，不能展示模型隐藏思维链。媒体生成和联网搜索尚未接入。免费模型可能限速、变更或不可用。",13f,dim),lp(28))
+        val sc=ScrollView(this);sc.addView(box);body.addView(sc)
     }
 }
