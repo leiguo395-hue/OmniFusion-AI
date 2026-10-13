@@ -3,8 +3,13 @@ package com.omnifusion.mobile
 import android.app.*
 import android.content.*
 import android.graphics.Color
-import android.graphics.Typeface
+import android.graphics.BitmapFactory
 import android.graphics.drawable.GradientDrawable
+import android.provider.MediaStore
+import android.content.ContentValues
+import android.os.Build
+import android.view.WindowManager
+import android.graphics.Typeface
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -118,7 +123,7 @@ class MainActivity : Activity() {
     private fun items()=chats.getJSONObject(current).getJSONArray("items")
     private fun persist(){prefs.edit().putString("chats",chats.toString()).putInt("current",current).apply()}
     override fun onCreate(savedInstanceState:Bundle?){
-        super.onCreate(savedInstanceState);window.statusBarColor=bg;window.navigationBarColor=bg
+        super.onCreate(savedInstanceState);window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);window.statusBarColor=bg;window.navigationBarColor=bg
         model=prefs.getString("model","openrouter/free") ?: "openrouter/free"
         thinking=prefs.getString("thinking","high") ?: "high"
         assistantStyle=prefs.getString("style","balanced") ?: "balanced"
@@ -415,8 +420,9 @@ class MainActivity : Activity() {
         }
     }
     private fun createPage(){
-        heading("创作工作台 ✨","从灵感到专业提示词。媒体生成需另接可用的 API。")
+        heading("创作工作台 ✨","真正的 AI 生图与创意工具。生成图片前会确认费用。")
         val cards=vertical().apply{setPadding(dp(18),0,dp(18),dp(10))}
+        cards.addView(button("🎨  AI 真正生图 · 选择模型后生成"){imageCreator()},lp(8))
         val choices=listOf(
             Triple("✧  视觉创意","生成摄影、插画、海报的中英双语提示词","请作为专业视觉艺术总监，把我的想法扩展成高质量生图提示词，含构图、风格、镜头、光照、色彩和负面提示词："),
             Triple("▣  视频分镜","规划视频的镜头、画面和运镜","请作为电影导演，把我的构想写成完整短视频分镜表，含秒数、景别、机位、运镜、主体、氛围、声音和视频模型提示词："),
@@ -431,8 +437,109 @@ class MainActivity : Activity() {
             box.addView(text(title+"   ↗",19f,white,true));box.addView(text(desc,13f,dim),lp(9))
             cards.addView(box,lp(12))
         }
-        cards.addView(text("说明：此版本不假装拥有尚未接入的生图或视频生成 API。",12f,dim),lp(17))
+        cards.addView(text("图片使用 OpenRouter 图片 API，须有可用额度；生成价格依模型而异，确认后才会请求。视频生成尚未接入。",12f,dim),lp(17))
         val scroll=ScrollView(this);scroll.addView(cards);body.addView(scroll)
+    }
+    private fun imageCreator(){
+        if(secureKey().isBlank()){keyDialog();return}
+        Toast.makeText(this,"正在加载图片模型…",Toast.LENGTH_SHORT).show()
+        thread {
+            try {
+                val c=URL("https://openrouter.ai/api/v1/images/models").openConnection() as HttpURLConnection
+                c.connectTimeout=15000;c.readTimeout=20000
+                val response=c.inputStream.bufferedReader().use{it.readText()}
+                c.disconnect()
+                val entries=JSONObject(response).getJSONArray("data")
+                val ids=mutableListOf<String>()
+                val names=mutableListOf<String>()
+                for(i in 0 until entries.length()){
+                    val v=entries.optJSONObject(i)?:continue
+                    val id=v.optString("id");if(id.isBlank())continue
+                    ids.add(id);names.add(v.optString("name",id)+" · "+id)
+                    if(ids.size>=80)break
+                }
+                runOnUiThread {
+                    if(ids.isEmpty())Toast.makeText(this,"图片模型目录为空",Toast.LENGTH_LONG).show()
+                    else AlertDialog.Builder(this).setTitle("选择生图模型 · 可能收费")
+                        .setItems(names.toTypedArray()){_,which->imagePrompt(ids[which],names[which])}
+                        .setNegativeButton("取消",null).show()
+                }
+            }catch(e:Exception){runOnUiThread { Toast.makeText(this,"图片模型加载失败："+e.message,Toast.LENGTH_LONG).show() }}
+        }
+    }
+    private fun imagePrompt(id:String,name:String){
+        val prompt=EditText(this).apply{
+            hint="详细描述你想生成的图片…";minLines=3;maxLines=6
+            setPadding(dp(18),dp(16),dp(18),dp(16))
+        }
+        AlertDialog.Builder(this).setTitle("图片生成 · "+name.take(40))
+            .setMessage("图片生成可能产生费用。请在 OpenRouter 查看此模型最新单图价格和余额；本 App 暂无硬性扣费上限。")
+            .setView(prompt)
+            .setPositiveButton("下一步"){_,_->
+                val content=prompt.text.toString().trim()
+                if(content.isBlank()){Toast.makeText(this,"请先输入图片描述",Toast.LENGTH_SHORT).show();return@setPositiveButton}
+                AlertDialog.Builder(this).setTitle("确认调用付费图片 API？")
+                    .setMessage("模型：$id\\n\\n此操作可能从你的 OpenRouter 余额扣费。是否继续？")
+                    .setPositiveButton("同意生成"){_,_->generateImage(id,content)}
+                    .setNegativeButton("取消",null).show()
+            }.setNegativeButton("取消",null).show()
+    }
+    private fun generateImage(id:String,prompt:String){
+        val secret=secureKey()
+        if(secret.isBlank()){keyDialog();return}
+        val progress=ProgressDialog(this).apply{
+            setTitle("正在生成图片")
+            setMessage("图片生成可能需要一分钟以上…")
+            setCancelable(false);show()
+        }
+        thread {
+            var conn:HttpURLConnection?=null
+            try{
+                conn=URL("https://openrouter.ai/api/v1/images").openConnection() as HttpURLConnection
+                conn.requestMethod="POST";conn.doOutput=true;conn.connectTimeout=20000;conn.readTimeout=180000
+                conn.setRequestProperty("Authorization","Bearer $secret")
+                conn.setRequestProperty("Content-Type","application/json")
+                val payload=JSONObject().put("model",id).put("prompt",prompt).put("n",1)
+                conn.outputStream.use{it.write(payload.toString().toByteArray(Charsets.UTF_8))}
+                val status=conn.responseCode
+                if(status !in 200..299){
+                    val detail=conn.errorStream?.bufferedReader()?.use{it.readText()}?:"未知错误"
+                    throw Exception("HTTP $status · "+detail.take(300))
+                }
+                val data=JSONObject(conn.inputStream.bufferedReader().use{it.readText()})
+                    .getJSONArray("data").getJSONObject(0)
+                val encoded=data.optString("b64_json")
+                if(encoded.isEmpty())throw Exception("接口未返回图片数据")
+                val bytes=Base64.decode(encoded.substringAfter("base64,",encoded),Base64.DEFAULT)
+                val bitmap=BitmapFactory.decodeByteArray(bytes,0,bytes.size)?:throw Exception("不支持的图片格式")
+                runOnUiThread{
+                    progress.dismiss()
+                    val image=ImageView(this).apply{
+                        setImageBitmap(bitmap);adjustViewBounds=true
+                        scaleType=ImageView.ScaleType.FIT_CENTER
+                    }
+                    val frame=ScrollView(this).apply{addView(image)}
+                    AlertDialog.Builder(this).setTitle("生成完成 · "+id)
+                        .setView(frame)
+                        .setPositiveButton("保存到相册"){_,_->
+                            try{
+                                val values=ContentValues().apply{
+                                    put(MediaStore.Images.Media.DISPLAY_NAME,"OmniFusion_"+System.currentTimeMillis()+".png")
+                                    put(MediaStore.Images.Media.MIME_TYPE,"image/png")
+                                    if(Build.VERSION.SDK_INT>=29)put(MediaStore.Images.Media.RELATIVE_PATH,"Pictures/OmniFusion")
+                                }
+                                if(Build.VERSION.SDK_INT<29)throw Exception("Android 10 以下需要额外存储权限")
+                                val uri=contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI,values)?:throw Exception("无法创建相册文件")
+                                contentResolver.openOutputStream(uri)?.use{stream->
+                                    if(!bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG,100,stream))throw Exception("图片保存失败")
+                                }?:throw Exception("无法打开相册写入")
+                                Toast.makeText(this,"已保存到相册",Toast.LENGTH_LONG).show()
+                            }catch(e:Exception){Toast.makeText(this,"保存失败："+e.message,Toast.LENGTH_LONG).show()}
+                        }.setNegativeButton("关闭",null).show()
+                }
+            }catch(e:Exception){runOnUiThread{progress.dismiss();AlertDialog.Builder(this).setTitle("图片生成失败").setMessage(e.message).setPositiveButton("好的",null).show()}}
+            finally{conn?.disconnect()}
+        }
     }
     private fun historyPage(){
         heading("聊天档案 ▤","会话保存在本机，点击继续，长按删除。")
