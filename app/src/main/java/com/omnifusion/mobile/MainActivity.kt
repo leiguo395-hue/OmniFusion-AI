@@ -683,10 +683,17 @@ class MainActivity : Activity() {
                 .setNegativeButton("取消",null).show()
             return
         }
-        val labels=candidates.take(60).map { it.id+(if(it.free)" · 免费价格标记" else " · 可能付费") }.toTypedArray()
-        AlertDialog.Builder(this).setTitle("选择真正支持图片输出的模型")
+        val free=candidates.filter{it.free}
+        val paid=candidates.filterNot{it.free}
+        val shown=(free+paid).take(80)
+        val labels=shown.map{(if(it.free)"免费标价 · " else "可能付费 · ")+it.id}.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("图片模型 · 免费 "+free.size+" · 其他 "+paid.size)
+            .setMessage(if(free.isEmpty())
+                "目录中没有查到明确零价格的生图模型。其他模型可能收费，选择后还会确认。"
+                else "零价格模型优先显示；是否有剩余额度以服务商响应为准。")
             .setItems(labels){_,index ->
-                val selected=candidates[index]
+                val selected=shown[index]
                 imagePrompt(selected.id,selected.id,prefill)
             }.setNegativeButton("取消",null).show()
     }
