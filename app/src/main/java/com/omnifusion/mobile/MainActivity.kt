@@ -6,6 +6,13 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.animation.ObjectAnimator
+import android.view.HapticFeedbackConstants
+import android.graphics.drawable.RippleDrawable
+import android.content.res.ColorStateList
+import android.view.animation.DecelerateInterpolator
 import android.text.InputType
 import android.util.Base64
 import android.view.Gravity
@@ -35,6 +42,11 @@ class MainActivity : Activity() {
     private var current = 0
     private var busy = false
     private var screen = 0
+    private val uiHandler=Handler(Looper.getMainLooper())
+    private var lastRender=0L
+    private var requestId=0
+    private var activeConnection:HttpURLConnection?=null
+    private var modelNames=mutableMapOf<String,String>()
     private lateinit var root: LinearLayout
     private lateinit var body: LinearLayout
     private lateinit var stream: ScrollView
@@ -50,7 +62,15 @@ class MainActivity : Activity() {
     private fun horizontal()=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL;gravity=Gravity.CENTER_VERTICAL}
     private fun lp(top:Int=0)=LinearLayout.LayoutParams(-1,-2).apply{topMargin=dp(top)}
     private fun button(s:String, action:()->Unit)=text(s,14f,white,true).apply{
-        gravity=Gravity.CENTER;setPadding(dp(13),dp(11),dp(13),dp(11));background=shape(panel,14);setOnClickListener{action()}
+        gravity=Gravity.CENTER;setPadding(dp(13),dp(11),dp(13),dp(11))
+        background=RippleDrawable(ColorStateList.valueOf(Color.rgb(72,79,128)),shape(panel,14),null)
+        setOnClickListener{
+            performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+            animate().scaleX(.96f).scaleY(.96f).setDuration(85).withEndAction{
+                animate().scaleX(1f).scaleY(1f).setDuration(150).start()
+            }.start()
+            action()
+        }
     }
     private fun copy(s:String){
         (getSystemService(CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("OmniFusion",s))
@@ -103,6 +123,7 @@ class MainActivity : Activity() {
         navigate(0)
     }
     private fun navigate(page:Int){
+        if(busy && page!=0){Toast.makeText(this,"回复中，请等待完成",Toast.LENGTH_SHORT).show();return}
         screen=page;root=vertical().apply{setBackgroundColor(bg)}
         val top=horizontal().apply{setPadding(dp(20),dp(13),dp(18),dp(13))}
         top.addView(text("✦  OmniFusion",24f,white,true),LinearLayout.LayoutParams(0,-2,1f))
@@ -120,17 +141,39 @@ class MainActivity : Activity() {
         }
         root.addView(nav);setContentView(root)
         when(page){0->chatPage();1->createPage();2->historyPage();else->settingsPage()}
+        body.alpha=0f;body.translationY=dp(9).toFloat()
+        body.animate().alpha(1f).translationY(0f).setDuration(210).setInterpolator(DecelerateInterpolator()).start()
     }
     private fun heading(title:String,description:String){
         body.addView(text(title,27f,white,true).apply{setPadding(dp(19),dp(10),dp(19),0)})
         body.addView(text(description,13f,dim).apply{setPadding(dp(19),dp(6),dp(19),dp(19))})
     }
+    private fun readableModel(id:String):String {
+        if(id=="openrouter/free")return "随机免费路由"
+        val n=modelNames[id]?:id.substringAfterLast('/')
+        val brand=when{
+            id.startsWith("deepseek/")->"深度求索"
+            id.startsWith("google/")->"谷歌 Gemini"
+            id.startsWith("openai/")->"OpenAI GPT"
+            id.startsWith("anthropic/")->"Claude"
+            id.startsWith("qwen/")->"阿里通义千问"
+            id.startsWith("nvidia/")->"英伟达"
+            id.startsWith("meta-llama/")->"Meta"
+            id.startsWith("mistralai/")->"Mistral"
+            id.startsWith("microsoft/")->"微软"
+            id.startsWith("minimax/")->"MiniMax"
+            id.startsWith("moonshotai/")->"月之暗面 Kimi"
+            id.startsWith("z-ai/")->"智谱 GLM"
+            else->"其他模型"
+        }
+        return "$brand · $n"
+    }
     private fun chatPage(){
         val row=horizontal().apply{setPadding(dp(15),0,dp(15),dp(10))}
-        row.addView(button("◆ ${model.substringAfterLast('/')} ▾"){modelDialog()},LinearLayout.LayoutParams(0,-2,1f))
+        row.addView(button("◆ ${readableModel(model).take(30)} ▾"){modelDialog()},LinearLayout.LayoutParams(0,-2,1f))
         row.addView(button("＋"){chats.put(newChat());current=chats.length()-1;persist();navigate(0)})
         body.addView(row)
-        stream=ScrollView(this).apply{isFillViewport=true}
+        stream=ScrollView(this).apply{isFillViewport=true;isVerticalScrollBarEnabled=false;overScrollMode=View.OVER_SCROLL_NEVER}
         transcript=vertical().apply{setPadding(dp(17),dp(10),dp(17),dp(15))}
         stream.addView(transcript);body.addView(stream,LinearLayout.LayoutParams(-1,0,1f))
         if(items().length()==0){
@@ -181,8 +224,8 @@ class MainActivity : Activity() {
         }
     }
     private fun modelDialog(){
-        AlertDialog.Builder(this).setTitle("模型中心")
-            .setItems(arrayOf("✦ OpenRouter 自动免费","☁ 查询实时免费模型","✎ 手动输入模型 ID")){_,choice->
+        AlertDialog.Builder(this).setTitle("中文精选模型中心")
+            .setItems(arrayOf("✦ 随机免费路由（不保证最强）","🏆 中文精选免费模型（在线查询）","✎ 自定义模型 ID（可能付费）")){_,choice->
                 when(choice){
                     0->choose("openrouter/free")
                     1->freeModels()
@@ -196,27 +239,51 @@ class MainActivity : Activity() {
     }
     private fun choose(id:String){if(id.isNotBlank()){model=id;prefs.edit().putString("model",id).apply();navigate(0)}}
     private fun freeModels(){
-        Toast.makeText(this,"查询免费模型中…",Toast.LENGTH_SHORT).show()
+        Toast.makeText(this,"正在查官方实时目录，只展示零价格模型…",Toast.LENGTH_SHORT).show()
         thread{
             try{
                 val conn=URL("https://openrouter.ai/api/v1/models").openConnection() as HttpURLConnection
                 conn.connectTimeout=15000;conn.readTimeout=20000
                 val arr=JSONObject(conn.inputStream.bufferedReader().use{it.readText()}).getJSONArray("data")
                 conn.disconnect()
-                val models=mutableListOf<Pair<String,String>>()
+                val choices=mutableListOf<Triple<String,String,Int>>()
                 for(i in 0 until arr.length()){
-                    val x=arr.getJSONObject(i);val cost=x.optJSONObject("pricing")?:continue
-                    if(cost.optString("prompt")=="0"&&cost.optString("completion")=="0")
-                        models.add(x.optString("name") to x.optString("id"))
+                    val x=arr.getJSONObject(i);val p=x.optJSONObject("pricing")?:continue
+                    val id=x.optString("id")
+                    val prompt=p.optString("prompt").toDoubleOrNull()?:continue
+                    val completion=p.optString("completion").toDoubleOrNull()?:continue
+                    if(prompt!=0.0||completion!=0.0)continue
+                    val rank=when{
+                        id.startsWith("deepseek/")->0
+                        id.startsWith("google/")->1
+                        id.startsWith("qwen/")->2
+                        id.startsWith("moonshotai/")->3
+                        id.startsWith("z-ai/")->4
+                        id.startsWith("minimax/")->5
+                        id.startsWith("nvidia/")->6
+                        id.startsWith("meta-llama/")->7
+                        id.startsWith("mistralai/")->8
+                        else->20
+                    }
+                    val title=x.optString("name",id)
+                    choices.add(Triple(id,title,rank))
                 }
-                models.sortBy{it.second};val shown=models.take(70)
+                choices.sortWith(compareBy<Triple<String,String,Int>>{it.third}.thenBy{it.first})
+                val preferred=choices.filter{it.third<20}
+                val shown=(if(preferred.isNotEmpty())preferred else choices).take(35)
                 runOnUiThread{
-                    if(shown.isEmpty())Toast.makeText(this,"暂未找到可用免费模型",Toast.LENGTH_LONG).show()
-                    else AlertDialog.Builder(this).setTitle("实时免费模型")
-                        .setItems(shown.map{it.first+" · "+it.second}.toTypedArray()){_,i->choose(shown[i].second)}
-                        .setNegativeButton("取消",null).show()
+                    if(shown.isEmpty()){
+                        AlertDialog.Builder(this).setTitle("没有可用的免费模型")
+                            .setMessage("官方目录目前未返回零价格模型，请检查网络或稍后再试。")
+                            .setPositiveButton("好的",null).show()
+                    }else{
+                        shown.forEach{modelNames[it.first]=it.second}
+                        AlertDialog.Builder(this).setTitle("精选免费模型 · 实时检测零价格")
+                            .setItems(shown.map{"${readableModel(it.first)}\n免费 · ${it.first}"}.toTypedArray()){_,i->choose(shown[i].first)}
+                            .setNegativeButton("取消",null).show()
+                    }
                 }
-            }catch(e:Exception){runOnUiThread{Toast.makeText(this,"模型列表失败：${e.message}",Toast.LENGTH_LONG).show()}}
+            }catch(e:Exception){runOnUiThread{Toast.makeText(this,"模型查询失败：${e.message}",Toast.LENGTH_LONG).show()}}
         }
     }
     private fun ask(){
