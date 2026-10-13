@@ -245,6 +245,7 @@ class MainActivity : Activity() {
         val row=horizontal().apply{setPadding(dp(15),0,dp(15),dp(10))}
         row.addView(button("◆ ${readableModel(model).take(30)} ▾"){modelDialog()},LinearLayout.LayoutParams(0,-2,1f))
         row.addView(button("🎨"){imageCreator()})
+        row.addView(button("⚡"){runCrossfire()})
         row.addView(button("＋"){chats.put(newChat());current=chats.length()-1;persist();navigate(0)})
         body.addView(row)
         stream=ScrollView(this).apply{isFillViewport=true;isVerticalScrollBarEnabled=false;overScrollMode=View.OVER_SCROLL_NEVER}
@@ -399,6 +400,80 @@ class MainActivity : Activity() {
      * Automatic fallback is free-only and same-capability; a manually selected model is locked.
      * No speculative model warming: OpenRouter is a remote stateless HTTP API.
      */
+    /**
+     * User-triggered two-model crossfire. Both requests run concurrently.
+     * Free catalog validation is mandatory; this mode will never spend on paid models.
+     */
+    private fun runCrossfire(){
+        if(busy)return
+        val prompt=input.text.toString().trim()
+        if(prompt.isBlank()){Toast.makeText(this,"请先输入需要交叉验证的问题",Toast.LENGTH_SHORT).show();return}
+        if(ModelRouter.taskOf(prompt)==ModelRouter.Task.IMAGE_GEN){
+            imageCreator(prompt)
+            return
+        }
+        val key=secureKey()
+        if(key.isBlank()){keyDialog();return}
+        val task=ModelRouter.taskOf(prompt)
+        val ids=mutableListOf<String>()
+        repeat(2){
+            val candidate=ModelRouter.choose(task,routingCatalog,excluded=ids.toSet())
+            if(candidate!=null)ids.add(candidate)
+        }
+        if(ids.size<2){
+            AlertDialog.Builder(this).setTitle("交叉火力未启动")
+                .setMessage("至少需要两个支持当前任务的零价格模型。请检查网络和免费模型目录。不会改用付费模型。")
+                .setPositiveButton("刷新模型目录"){_,_->warmFreeModelCatalog()}
+                .setNegativeButton("取消",null).show()
+            return
+        }
+        AlertDialog.Builder(this).setTitle("⚡ 并行交叉火力")
+            .setMessage("同时请求两个已验证免费模型：\\n"+ids.joinToString("\\n")+
+                "\\n\\n免费模型仍可能有速率限制。是否执行？")
+            .setPositiveButton("同时请求"){_,_->
+                val history=items()
+                val request=JSONArray().put(JSONObject().put("role","system").put("content",instruction()))
+                for(i in maxOf(0,history.length()-12) until history.length()){
+                    val item=history.optJSONObject(i)?:continue
+                    if(item.optString("role") in listOf("user","assistant"))
+                        request.put(JSONObject().put("role",item.optString("role"))
+                            .put("content",item.optString("content")))
+                }
+                request.put(JSONObject().put("role","user").put("content",prompt))
+                history.put(JSONObject().put("role","user").put("content",prompt))
+                bubble(prompt,true)
+                input.setText("")
+                val display=bubble("⚡ 两路模型并发执行中…",false)
+                busy=true;send.isEnabled=false
+                val requestIndex=++requestId
+                updateRouteStatus("⚡ 交叉火力 · "+task+" · 双模型并发中")
+                persist()
+                thread {
+                    val results=CrossfireEngine.compare(key,request,ids)
+                    val report=buildString {
+                        append("⚡ 交叉火力 · 双模型独立结果\\n")
+                        for((index,result) in results.withIndex()){
+                            append("\\n—— ").append(index+1).append(". ")
+                                .append(result.model).append(" (").append(result.durationMs).append("ms) ——\\n")
+                            append(if(result.error.isBlank())result.text else "⚠ "+result.error)
+                            append("\\n")
+                        }
+                        append("\\n结果并列呈现，差异需要进一步核实；并行不等于自动共识。")
+                    }
+                    runOnUiThread {
+                        if(requestIndex==requestId){
+                            display.text=report
+                            history.put(JSONObject().put("role","assistant").put("content",report))
+                            persist()
+                            updateRouteStatus("⚡ 交叉火力 · "+results.count{it.error.isBlank()}+
+                                "/2 成功 · "+results.maxOf{it.durationMs}+"ms")
+                            busy=false;send.isEnabled=true;send.alpha=1f
+                            stream.post{stream.fullScroll(View.FOCUS_DOWN)}
+                        }
+                    }
+                }
+            }.setNegativeButton("取消",null).show()
+    }
     private fun ask(){
         if(busy)return
         val question=input.text.toString().trim()
