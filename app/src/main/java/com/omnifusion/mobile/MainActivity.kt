@@ -381,20 +381,21 @@ class MainActivity : Activity() {
         if(task==ModelRouter.Task.IMAGE_GEN) return "openrouter/free" // UI sends this to the dedicated image generator.
         return ModelRouter.choose(task,routingCatalog) ?: "openrouter/free"
     }
+    /**
+     * Resilient streaming chat: each request receives its own connection.
+     * Automatic fallback is free-only and same-capability; a manually selected model is locked.
+     * No speculative model warming: OpenRouter is a remote stateless HTTP API.
+     */
     private fun ask(){
         if(busy)return
         val question=input.text.toString().trim()
         if(question.isEmpty())return
         val secret=secureKey()
-        if(secret.isEmpty()){keyDialog();return}
-        if(ModelRouter.taskOf(question)==ModelRouter.Task.IMAGE_GEN){
-            // An explicit image request must not silently turn into a text-only answer.
-            imageCreator(question)
-            return
-        }
+        if(secret.isBlank()){keyDialog();return}
+        val task=ModelRouter.taskOf(question)
+        if(task==ModelRouter.Task.IMAGE_GEN){imageCreator(question);return}
         val all=items()
-        val recent=JSONArray()
-        recent.put(JSONObject().put("role","system").put("content",instruction()))
+        val recent=JSONArray().put(JSONObject().put("role","system").put("content",instruction()))
         for(i in maxOf(0,all.length()-18) until all.length()){
             val entry=all.optJSONObject(i)?:continue
             if(entry.optString("role")=="assistant"||entry.optString("role")=="user")
@@ -406,80 +407,115 @@ class MainActivity : Activity() {
         persist()
         bubble(question,true)
         input.setText("")
-        val answerView=bubble("● 正在连接 ${readableModel(if(model=="openrouter/free")autoModel(question) else model)}…",false)
-        busy=true;send.isEnabled=false;send.alpha=.5f
-        val selected=if(model=="openrouter/free") autoModel(question) else model
+        val locked=model!="openrouter/free"
+        val candidates=if(locked)listOf(model) else {
+            val selected=mutableListOf<String>()
+            repeat(3){
+                val next=ModelRouter.choose(task,routingCatalog,excluded=selected.toSet())
+                if(next!=null) selected.add(next)
+            }
+            if(selected.isEmpty())selected.add("openrouter/free")
+            selected
+        }
+        val started=System.currentTimeMillis()
+        val answerView=bubble("◌ 正在连接 "+readableModel(candidates.first())+"…",false)
         val thisRequest=++requestId
-        thread{
-            var connection:HttpURLConnection?=null
+        busy=true;send.isEnabled=false;send.alpha=.5f
+        thread {
+            val switchLog=mutableListOf<String>()
+            var finalAnswer:String?=null
+            var usedModel=candidates.first()
+            var reasoning=""
+            var lastError=""
             try{
-                connection=URL("https://openrouter.ai/api/v1/chat/completions").openConnection() as HttpURLConnection
-                activeConnection=connection
-                connection.requestMethod="POST";connection.doOutput=true
-                connection.connectTimeout=17000;connection.readTimeout=80000
-                connection.setRequestProperty("Authorization","Bearer "+secret)
-                connection.setRequestProperty("Content-Type","application/json")
-                connection.setRequestProperty("Accept","text/event-stream")
-                connection.setRequestProperty("HTTP-Referer","https://github.com/leiguo395-hue/OmniFusion-AI")
-                connection.setRequestProperty("X-Title","OmniFusion AI")
-                val payload=JSONObject().put("model",selected).put("stream",true).put("messages",recent)
-                if(selected!="openrouter/free")payload.put("reasoning",JSONObject().put("effort",thinking))
-                connection.outputStream.use{it.write(payload.toString().toByteArray(Charsets.UTF_8))}
-                val http=connection.responseCode
-                if(http !in 200..299){
-                    val error=connection.errorStream?.bufferedReader()?.use{it.readText()}?:"无错误详情"
-                    throw Exception("HTTP $http · "+error.take(280))
-                }
-                val result=StringBuilder()
-                val thought=StringBuilder()
-                var serverError=""
-                connection.inputStream.bufferedReader().use{reader->
-                    while(true){
-                        val line=reader.readLine()?:break
-                        if(!line.startsWith("data:"))continue
-                        val body=line.substringAfter("data:").trim()
-                        if(body=="[DONE]")break
-                        try{
-                            val json=JSONObject(body)
-                            if(json.has("error")){serverError=json.optJSONObject("error")?.optString("message","模型返回错误")?:"模型返回错误";break}
-                            val choice=json.optJSONArray("choices")?.optJSONObject(0)
-                            val delta=choice?.optJSONObject("delta")
-                            val piece=delta?.optString("content","")?:""
-                            if(piece.isNotEmpty()&&piece!="null")result.append(piece)
-                            val reason=delta?.optString("reasoning","")?:""
-                            if(reason.isNotEmpty()&&reason!="null")thought.append(reason)
-                            val now=System.currentTimeMillis()
-                            if(now-lastRender>130){
-                                val snapshot=result.toString().ifBlank{"● 模型已连接，正在生成…"}
-                                runOnUiThread{if(thisRequest==requestId)answerView.text=snapshot}
-                                lastRender=now
+                for((index,id) in candidates.withIndex()){
+                    if(thisRequest!=requestId)break
+                    usedModel=id
+                    var connection:HttpURLConnection?=null
+                    val partial=StringBuilder()
+                    val thoughts=StringBuilder()
+                    try {
+                        runOnUiThread {
+                            if(thisRequest==requestId)answerView.text="◌ "+readableModel(id)+
+                                " · "+(index+1)+"/"+candidates.size+
+                                if(switchLog.isEmpty())" · 连接中…" else "\\n"+switchLog.joinToString("\\n")
+                        }
+                        connection=URL("https://openrouter.ai/api/v1/chat/completions").openConnection() as HttpURLConnection
+                        activeConnection=connection
+                        connection.requestMethod="POST";connection.doOutput=true
+                        connection.connectTimeout=16000;connection.readTimeout=85000
+                        connection.setRequestProperty("Authorization","Bearer "+secret)
+                        connection.setRequestProperty("Content-Type","application/json")
+                        connection.setRequestProperty("Accept","text/event-stream")
+                        connection.setRequestProperty("HTTP-Referer","https://github.com/leiguo395-hue/OmniFusion-AI")
+                        connection.setRequestProperty("X-Title","OmniFusion AI")
+                        val payload=JSONObject().put("model",id).put("stream",true).put("messages",recent)
+                        // A nonstandard reasoning parameter can cause free models to reject requests.
+                        connection.outputStream.use{it.write(payload.toString().toByteArray(Charsets.UTF_8))}
+                        val code=connection.responseCode
+                        if(code !in 200..299) {
+                            val detail=connection.errorStream?.bufferedReader()?.use{it.readText()} ?: "未提供错误详情"
+                            throw Exception("HTTP $code: "+detail.take(140))
+                        }
+                        var streamError=""
+                        connection.inputStream.bufferedReader().use{reader->
+                            while(true){
+                                val line=reader.readLine()?:break
+                                if(!line.startsWith("data:"))continue
+                                val event=line.substringAfter("data:").trim()
+                                if(event=="[DONE]")break
+                                try{
+                                    val item=JSONObject(event)
+                                    if(item.has("error")){
+                                        streamError=item.optJSONObject("error")?.optString("message","流式响应错误")?:"流式响应错误"
+                                        break
+                                    }
+                                    val delta=item.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("delta")
+                                    val word=delta?.optString("content","")?:""
+                                    if(word.isNotEmpty()&&word!="null")partial.append(word)
+                                    val thinkingText=delta?.optString("reasoning","")?:""
+                                    if(thinkingText.isNotEmpty()&&thinkingText!="null")thoughts.append(thinkingText)
+                                    val now=System.currentTimeMillis()
+                                    if(now-lastRender>120 && partial.isNotEmpty()){
+                                        val viewText=partial.toString()
+                                        runOnUiThread{if(thisRequest==requestId)answerView.text=viewText}
+                                        lastRender=now
+                                    }
+                                }catch(_:org.json.JSONException){}
                             }
-                        }catch(_:Exception){}
+                        }
+                        if(streamError.isNotEmpty())throw Exception(streamError)
+                        if(partial.isEmpty())throw Exception("模型未返回文本")
+                        finalAnswer=partial.toString()
+                        reasoning=thoughts.toString().take(10000)
+                        break
+                    }catch(e:Exception){
+                        lastError=(e.message?:"网络故障").take(220)
+                        // If tokens already streamed, rerouting would duplicate/contradict output.
+                        // Also never override a manual lock or retry on invalid credentials.
+                        val authError=lastError.contains("HTTP 401") || lastError.contains("HTTP 403")
+                        if(partial.isNotEmpty() || locked || authError || index==candidates.lastIndex)break
+                        switchLog.add("↪ "+id+" 不可用："+lastError.take(80)+"，切换免费备用模型")
+                    }finally{
+                        connection?.disconnect()
+                        activeConnection=null
                     }
                 }
-                if(serverError.isNotBlank())throw Exception(serverError)
-                if(result.isEmpty())throw Exception("模型未返回正文；可能已达到免费额度、正在限流，或当前模型不支持此请求")
-                val final=result.toString()
+                val elapsed=System.currentTimeMillis()-started
                 runOnUiThread{
                     if(thisRequest==requestId){
-                        answerView.text=final
-                        all.put(JSONObject().put("role","assistant").put("content",final)
-                            .put("reason",thought.toString().take(10000)))
-                        persist()
-                    }
-                }
-            }catch(e:Exception){
-                val error=(e.message?:"网络异常").take(380)
-                runOnUiThread{
-                    if(thisRequest==requestId){
-                        answerView.text="⚠ 请求失败：$error\n\n建议换一个精选免费模型，或者检查 OpenRouter 免费额度。"
-                        // Failed requests are shown in the UI but not added to future model context.
-                        all.put(JSONObject().put("role","assistant").put("content",answerView.text.toString()))
+                        val explanation="\\n\\n—— 调度信息 ——\\n"+
+                            "任务："+task+" · 模型："+usedModel+" · 耗时："+elapsed+"ms"+
+                            if(switchLog.isEmpty())"" else "\\n"+switchLog.joinToString("\\n")
+                        answerView.text=if(finalAnswer!=null)finalAnswer+explanation else
+                            "⚠ 当前模型请求失败："+lastError+"\\n"+switchLog.joinToString("\\n")
+                        all.put(JSONObject().put("role","assistant").put("content",
+                            finalAnswer ?: "请求未完成："+lastError)
+                            .put("reason",reasoning))
                         persist()
                     }
                 }
             }finally{
-                connection?.disconnect();activeConnection=null
                 runOnUiThread{
                     if(thisRequest==requestId){
                         busy=false;send.isEnabled=true;send.alpha=1f
