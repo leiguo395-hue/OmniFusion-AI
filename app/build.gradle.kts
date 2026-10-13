@@ -24,4 +24,7 @@ android {
  kotlinOptions { jvmTarget = "17" }
 }
 
-dependencies { implementation("com.github.QWEA0:liquidglass:v2.0.11") }
+dependencies {
+ implementation("com.github.QWEA0:liquidglass:v2.0.11")
+ implementation("androidx.core:core-ktx:1.13.1")
+}
