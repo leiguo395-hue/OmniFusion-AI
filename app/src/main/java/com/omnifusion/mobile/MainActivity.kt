@@ -106,6 +106,22 @@ class MainActivity : Activity() {
         if(old.isNotBlank())storeKey(old)
         return old
     }
+    // Prevent pasted prompts and multiline text from becoming HTTP Authorization headers.
+    private fun validRouterKey(key:String):Boolean =
+        key.length in 12..512 && key.startsWith("sk-or-") &&
+        key.all { it.code in 33..126 } && !key.contains(" ")
+
+    private fun requireRouterKey():String? {
+        val key=secureKey()
+        if(!validRouterKey(key)){
+            AlertDialog.Builder(this).setTitle("API Key 配置错误")
+                .setMessage("当前保存的内容不是有效格式的 OpenRouter API Key。请粘贴以 sk-or- 开头的密钥，不要粘贴提示词或聊天内容。")
+                .setPositiveButton("重新设置"){_,_->keyDialog()}
+                .setNegativeButton("取消",null).show()
+            return null
+        }
+        return key
+    }
     private fun storeKey(value:String){
         try{
             val store=KeyStore.getInstance("AndroidKeyStore").apply{load(null)}
@@ -125,7 +141,14 @@ class MainActivity : Activity() {
         val edit=EditText(this).apply{hint="sk-or-…";setText(secureKey());inputType=InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD}
         val box=vertical().apply{setPadding(dp(22),0,dp(22),0);addView(edit)}
         AlertDialog.Builder(this).setTitle("🔐 OpenRouter API Key").setMessage("使用 Android Keystore 加密保存在本机，不会提交到 GitHub。")
-            .setView(box).setPositiveButton("保存"){_,_->storeKey(edit.text.toString().trim());navigate(screen)}
+            .setView(box).setPositiveButton("保存"){_,_->
+                val candidate=edit.text.toString().trim()
+                if(validRouterKey(candidate)){storeKey(candidate);navigate(screen)}
+                else AlertDialog.Builder(this).setTitle("密钥格式不正确")
+                    .setMessage("OpenRouter 密钥必须以 sk-or- 开头，只包含单行可打印字符。请不要粘贴提示词。")
+                    .setPositiveButton("重新输入"){_,_->keyDialog()}
+                    .setNegativeButton("取消",null).show()
+            }
             .setNegativeButton("取消",null).show()
     }
     private fun newChat()=JSONObject().put("title","新对话").put("items",JSONArray())
@@ -412,8 +435,7 @@ class MainActivity : Activity() {
             imageCreator(prompt)
             return
         }
-        val key=secureKey()
-        if(key.isBlank()){keyDialog();return}
+        val key=requireRouterKey() ?: return
         val task=ModelRouter.taskOf(prompt)
         val ids=mutableListOf<String>()
         repeat(2){
@@ -478,8 +500,7 @@ class MainActivity : Activity() {
         if(busy)return
         val question=input.text.toString().trim()
         if(question.isEmpty())return
-        val secret=secureKey()
-        if(secret.isBlank()){keyDialog();return}
+        val secret=requireRouterKey() ?: return
         val task=ModelRouter.taskOf(question)
         if(task==ModelRouter.Task.IMAGE_GEN){imageCreator(question);return}
         val all=items()
@@ -582,7 +603,8 @@ class MainActivity : Activity() {
                         lastError=(e.message?:"网络故障").take(220)
                         // If tokens already streamed, rerouting would duplicate/contradict output.
                         // Also never override a manual lock or retry on invalid credentials.
-                        val authError=lastError.contains("HTTP 401") || lastError.contains("HTTP 403")
+                        val authError=lastError.contains("HTTP 401") || lastError.contains("HTTP 403") ||
+                            lastError.contains("header value") || lastError.contains("Unexpected char")
                         if(partial.isNotEmpty() || locked || authError || index==candidates.lastIndex)break
                         switchLog.add("↪ "+id+" 不可用："+lastError.take(80)+"，切换免费备用模型")
                         val switching=index+1
@@ -644,7 +666,7 @@ class MainActivity : Activity() {
         val scroll=ScrollView(this);scroll.addView(cards);body.addView(scroll)
     }
     private fun imageCreator(prefill:String=""){
-        if(secureKey().isBlank()){keyDialog();return}
+        if(requireRouterKey()==null)return
         // Present only models whose official metadata advertises image OUTPUT.
         // Do not mistake image-input vision models for image generation.
         val candidates=ModelRouter.imageModels(routingCatalog)
@@ -681,8 +703,7 @@ class MainActivity : Activity() {
             }.setNegativeButton("取消",null).show()
     }
     private fun generateImage(id:String,prompt:String){
-        val secret=secureKey()
-        if(secret.isBlank()){keyDialog();return}
+        val secret=requireRouterKey() ?: return
         val progress=ProgressDialog(this).apply{
             setTitle("正在生成图片")
             setMessage("图片生成可能需要一分钟以上…")
