@@ -70,5 +70,30 @@ internal object ModelRouter {
         }?.id
     }
 
+    /** Spread retries across provider families rather than retrying the same rate-limit pool. */
+    fun chooseDistinct(
+        task:Task,
+        catalog:List<Model>,
+        count:Int=3,
+        unavailable:Set<String> = emptySet()
+    ):List<String> {
+        val result=mutableListOf<String>()
+        val families=mutableSetOf<String>()
+        repeat(count){
+            val options=catalog.filter { it.free && it.id !in unavailable && it.id !in result &&
+                when(task){
+                    Task.IMAGE_GEN -> it.supportsImageGeneration
+                    Task.VISION -> it.supportsVision && it.supportsText
+                    else -> it.supportsText
+                }
+            }
+            val distinct=options.filter { it.id.substringBefore('/') !in families }
+            val pick=choose(task,distinct.ifEmpty{options}) ?: return@repeat
+            result.add(pick)
+            families.add(pick.substringBefore('/'))
+        }
+        return result
+    }
+
     fun imageModels(catalog:List<Model>):List<Model> = catalog.filter { it.supportsImageGeneration }
 }
