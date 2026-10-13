@@ -43,8 +43,8 @@ class MainActivity : Activity() {
     private var busy = false
     private var screen = 0
     private val uiHandler=Handler(Looper.getMainLooper())
-    private var lastRender=0L
-    private var requestId=0
+    @Volatile private var lastRender=0L
+    @Volatile private var requestId=0
     private var activeConnection:HttpURLConnection?=null
     private var modelNames=mutableMapOf<String,String>()
     private lateinit var root: LinearLayout
@@ -288,66 +288,102 @@ class MainActivity : Activity() {
     }
     private fun ask(){
         if(busy)return
-        val question=input.text.toString().trim();if(question.isEmpty())return
-        val secret=secureKey();if(secret.isEmpty()){keyDialog();return}
-        val messages=JSONArray();val all=items()
-        for(i in maxOf(0,all.length()-20) until all.length()){
-            val item=all.optJSONObject(i)?:continue
-            messages.put(JSONObject().put("role",item.optString("role")).put("content",item.optString("content")))
+        val question=input.text.toString().trim()
+        if(question.isEmpty())return
+        val secret=secureKey()
+        if(secret.isEmpty()){keyDialog();return}
+        val all=items()
+        val recent=JSONArray()
+        for(i in maxOf(0,all.length()-18) until all.length()){
+            val entry=all.optJSONObject(i)?:continue
+            if(entry.optString("role")=="assistant"||entry.optString("role")=="user")
+                recent.put(JSONObject().put("role",entry.optString("role")).put("content",entry.optString("content")))
         }
-        messages.put(JSONObject().put("role","user").put("content",question))
+        recent.put(JSONObject().put("role","user").put("content",question))
         all.put(JSONObject().put("role","user").put("content",question))
         if(all.length()==1)chats.getJSONObject(current).put("title",question.take(24))
-        persist();bubble(question,true);input.setText("")
-        val result=bubble("正在连接模型…",false)
+        persist()
+        bubble(question,true)
+        input.setText("")
+        val answerView=bubble("● 正在连接模型…",false)
         busy=true;send.isEnabled=false;send.alpha=.5f
         val selected=model
+        val thisRequest=++requestId
         thread{
             var connection:HttpURLConnection?=null
             try{
                 connection=URL("https://openrouter.ai/api/v1/chat/completions").openConnection() as HttpURLConnection
+                activeConnection=connection
                 connection.requestMethod="POST";connection.doOutput=true
-                connection.connectTimeout=20000;connection.readTimeout=120000
+                connection.connectTimeout=17000;connection.readTimeout=80000
                 connection.setRequestProperty("Authorization","Bearer "+secret)
                 connection.setRequestProperty("Content-Type","application/json")
+                connection.setRequestProperty("Accept","text/event-stream")
                 connection.setRequestProperty("HTTP-Referer","https://github.com/leiguo395-hue/OmniFusion-AI")
                 connection.setRequestProperty("X-Title","OmniFusion AI")
-                val payload=JSONObject().put("model",selected).put("stream",true).put("messages",messages)
+                val payload=JSONObject().put("model",selected).put("stream",true).put("messages",recent)
                 connection.outputStream.use{it.write(payload.toString().toByteArray(Charsets.UTF_8))}
-                val status=connection.responseCode
-                if(status !in 200..299){
-                    val error=connection.errorStream?.bufferedReader()?.use{it.readText()}?:""
-                    throw Exception("HTTP $status: "+error.take(340))
+                val http=connection.responseCode
+                if(http !in 200..299){
+                    val error=connection.errorStream?.bufferedReader()?.use{it.readText()}?:"无错误详情"
+                    throw Exception("HTTP $http · "+error.take(280))
                 }
-                val answer=StringBuilder();val reasoning=StringBuilder()
-                connection.inputStream.bufferedReader().useLines{lines->
-                    for(line in lines){
-                        if(!line.startsWith("data: "))continue
-                        val json=line.removePrefix("data: ").trim()
-                        if(json=="[DONE]")break
+                val result=StringBuilder()
+                val thought=StringBuilder()
+                var serverError=""
+                connection.inputStream.bufferedReader().use{reader->
+                    while(true){
+                        val line=reader.readLine()?:break
+                        if(!line.startsWith("data:"))continue
+                        val body=line.substringAfter("data:").trim()
+                        if(body=="[DONE]")break
                         try{
-                            val delta=JSONObject(json).optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("delta")
-                            val part=delta?.optString("content","")?:""
-                            val think=delta?.optString("reasoning","")?:""
-                            if(part!="null")answer.append(part)
-                            if(think!="null")reasoning.append(think)
-                            val preview=answer.toString().ifBlank{"模型正在处理请求…"}
-                            runOnUiThread{result.text=preview}
+                            val json=JSONObject(body)
+                            if(json.has("error")){serverError=json.optJSONObject("error")?.optString("message","模型返回错误")?:"模型返回错误";break}
+                            val choice=json.optJSONArray("choices")?.optJSONObject(0)
+                            val delta=choice?.optJSONObject("delta")
+                            val piece=delta?.optString("content","")?:""
+                            if(piece.isNotEmpty()&&piece!="null")result.append(piece)
+                            val reason=delta?.optString("reasoning","")?:""
+                            if(reason.isNotEmpty()&&reason!="null")thought.append(reason)
+                            val now=System.currentTimeMillis()
+                            if(now-lastRender>130){
+                                val snapshot=result.toString().ifBlank{"● 模型已连接，正在生成…"}
+                                runOnUiThread{if(thisRequest==requestId)answerView.text=snapshot}
+                                lastRender=now
+                            }
                         }catch(_:Exception){}
                     }
                 }
-                val final=answer.toString().ifBlank{"模型没有返回文字"}
-                all.put(JSONObject().put("role","assistant").put("content",final).put("reason",reasoning.toString().take(12000)))
-                runOnUiThread{persist();redraw()}
-            }catch(e:Exception){
+                if(serverError.isNotBlank())throw Exception(serverError)
+                if(result.isEmpty())throw Exception("模型未返回正文；可能已达到免费额度、正在限流，或当前模型不支持此请求")
+                val final=result.toString()
                 runOnUiThread{
-                    result.text="请求失败：${e.message}"
-                    all.put(JSONObject().put("role","assistant").put("content",result.text.toString()))
-                    persist()
+                    if(thisRequest==requestId){
+                        answerView.text=final
+                        all.put(JSONObject().put("role","assistant").put("content",final)
+                            .put("reason",thought.toString().take(10000)))
+                        persist()
+                    }
+                }
+            }catch(e:Exception){
+                val error=(e.message?:"网络异常").take(380)
+                runOnUiThread{
+                    if(thisRequest==requestId){
+                        answerView.text="⚠ 请求失败：$error\n\n建议换一个精选免费模型，或者检查 OpenRouter 免费额度。"
+                        // Failed requests are shown in the UI but not added to future model context.
+                        all.put(JSONObject().put("role","assistant").put("content",answerView.text.toString()))
+                        persist()
+                    }
                 }
             }finally{
-                connection?.disconnect()
-                runOnUiThread{busy=false;send.isEnabled=true;send.alpha=1f}
+                connection?.disconnect();activeConnection=null
+                runOnUiThread{
+                    if(thisRequest==requestId){
+                        busy=false;send.isEnabled=true;send.alpha=1f
+                        stream.post{stream.fullScroll(View.FOCUS_DOWN)}
+                    }
+                }
             }
         }
     }
