@@ -38,6 +38,8 @@ class MainActivity : Activity() {
     private val dim = Color.rgb(154,164,193)
     private val prefs by lazy { getSharedPreferences("omni", MODE_PRIVATE) }
     private var model = "openrouter/free"
+    private var thinking = "high"
+    private var assistantStyle = "balanced"
     private var chats = JSONArray()
     private var current = 0
     private var busy = false
@@ -117,6 +119,8 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState:Bundle?){
         super.onCreate(savedInstanceState);window.statusBarColor=bg;window.navigationBarColor=bg
         model=prefs.getString("model","openrouter/free") ?: "openrouter/free"
+        thinking=prefs.getString("thinking","high") ?: "high"
+        assistantStyle=prefs.getString("style","balanced") ?: "balanced"
         chats=try{JSONArray(prefs.getString("chats","[]"))}catch(_:Exception){JSONArray()}
         if(chats.length()==0)chats.put(newChat())
         current=prefs.getInt("current",0).coerceIn(0,chats.length()-1)
@@ -294,6 +298,7 @@ class MainActivity : Activity() {
         if(secret.isEmpty()){keyDialog();return}
         val all=items()
         val recent=JSONArray()
+        recent.put(JSONObject().put("role","system").put("content",instruction()))
         for(i in maxOf(0,all.length()-18) until all.length()){
             val entry=all.optJSONObject(i)?:continue
             if(entry.optString("role")=="assistant"||entry.optString("role")=="user")
@@ -322,6 +327,7 @@ class MainActivity : Activity() {
                 connection.setRequestProperty("HTTP-Referer","https://github.com/leiguo395-hue/OmniFusion-AI")
                 connection.setRequestProperty("X-Title","OmniFusion AI")
                 val payload=JSONObject().put("model",selected).put("stream",true).put("messages",recent)
+                if(selected!="openrouter/free")payload.put("reasoning",JSONObject().put("effort",thinking))
                 connection.outputStream.use{it.write(payload.toString().toByteArray(Charsets.UTF_8))}
                 val http=connection.responseCode
                 if(http !in 200..299){
@@ -429,11 +435,46 @@ class MainActivity : Activity() {
         }
         val sc=ScrollView(this);sc.addView(cards);body.addView(sc)
     }
+    private fun instruction():String {
+        val style=when(assistantStyle){
+            "brief"->"回答简练直接，优先结论和关键步骤，不堆砌套话。"
+            "technical"->"以工程师方式回答：准确、可验证、给可执行方案和必要测试。"
+            else->"自然中文交流，聪明、友好、清晰，有适度幽默但不油腻。"
+        }
+        return "你是 OmniFusion AI，一位认真、严谨、善于解决复杂问题的中文助手。"+
+            "先判断用户的真正目标和约束，必要时拆解问题并内部检查结论。"+
+            "事实、推测、未知要明确区分；不编造资料、工具调用、运行结果或链接。"+
+            "数学和代码注意边界情况与验证；复杂任务先规划再执行，最终给可操作结果。"+
+            "不展示隐藏思维链，但可以给简洁的依据、步骤、检查结果。"+
+            "当模型能力或信息不足时明确说出，不要假装成功。"+style
+    }
+    private fun thinkingDialog(){
+        val labels=arrayOf("⚡ 快速 · 低推理","⚖ 均衡 · 中推理","🧠 深度 · 高推理")
+        val values=arrayOf("low","medium","high")
+        AlertDialog.Builder(this).setTitle("思考强度（取决于模型支持）")
+            .setSingleChoiceItems(labels,values.indexOf(thinking).coerceAtLeast(0)){dialog,index->
+                thinking=values[index];prefs.edit().putString("thinking",thinking).apply()
+                dialog.dismiss();navigate(3)
+            }.setNegativeButton("取消",null).show()
+    }
+    private fun styleDialog(){
+        val labels=arrayOf("自然聪明 · 日常交流","简洁直接 · 重点优先","严谨工程师 · 代码与分析")
+        val values=arrayOf("balanced","brief","technical")
+        AlertDialog.Builder(this).setTitle("交流风格")
+            .setSingleChoiceItems(labels,values.indexOf(assistantStyle).coerceAtLeast(0)){dialog,index->
+                assistantStyle=values[index];prefs.edit().putString("style",assistantStyle).apply()
+                dialog.dismiss();navigate(3)
+            }.setNegativeButton("取消",null).show()
+    }
     private fun settingsPage(){
         heading("控制中心 ⚙","所有模型、密钥和聊天数据都由你管理。")
         val box=vertical().apply{setPadding(dp(18),0,dp(18),dp(16))}
         box.addView(button(if(secureKey().isEmpty())"🔐  添加 API Key" else "🔐  修改 API Key"){keyDialog()},lp(8))
         box.addView(button("◆  模型：${model.substringAfterLast('/')}"){modelDialog()},lp(12))
+        box.addView(text("AI 大脑配置",20f,white,true),lp(28))
+        box.addView(button("🧠  思考强度："+when(thinking){"low"->"快速";"medium"->"均衡";else->"深度"}){thinkingDialog()},lp(12))
+        box.addView(button("✦  交流风格："+when(assistantStyle){"brief"->"简洁";"technical"->"严谨";else->"自然"}){styleDialog()},lp(12))
+        box.addView(text("推理强度仅对支持的模型生效，部分免费模型可能忽略或拒绝参数。强推理不保证答案正确。",12f,dim),lp(9))
         box.addView(text("数据管理",20f,white,true),lp(28))
         box.addView(button("↗  导出全部对话"){
             val sb=StringBuilder("OmniFusion AI 聊天导出\n\n")
