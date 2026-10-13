@@ -63,6 +63,8 @@ class MainActivity : Activity() {
     private var modelNames=mutableMapOf<String,String>()
     private lateinit var root: LinearLayout
     private lateinit var body: LinearLayout
+    private var routeStatus: TextView? = null
+    private fun updateRouteStatus(value:String){ routeStatus?.text=value }
     private lateinit var stream: ScrollView
     private lateinit var transcript: LinearLayout
     private lateinit var input: EditText
@@ -252,6 +254,17 @@ class MainActivity : Activity() {
             transcript.addView(text("你的灵感，从这里开始。",25f,white,true),lp(38))
             transcript.addView(text("提问、创作、编程、学习。选择适合的免费云端模型。",15f,dim),lp(15))
         }else redraw()
+        // Lightweight routing visibility; no network call is triggered by opening this panel.
+        routeStatus=text("◈ 调度待命 · "+(if(model=="openrouter/free")"AUTO 免费优先" else "手动锁定")+
+            " · 模型目录 "+routingCatalog.size+" 个 · 额度未知",11f,dim).apply{
+            setPadding(dp(18),dp(5),dp(18),dp(5))
+            setOnClickListener{
+                AlertDialog.Builder(this@MainActivity).setTitle("模型调度状态")
+                    .setMessage(text.toString()+"\\n\\n健康度与剩余额度仅在服务商提供可靠数据时显示；未检测到的数据不猜测。")
+                    .setPositiveButton("确定",null).show()
+            }
+        }
+        body.addView(routeStatus)
         val bar=horizontal().apply{
             background=shape(panel,21);setPadding(dp(7),dp(7),dp(7),dp(7))
         }
@@ -420,6 +433,7 @@ class MainActivity : Activity() {
         val started=System.currentTimeMillis()
         val answerView=bubble("◌ 正在连接 "+readableModel(candidates.first())+"…",false)
         val thisRequest=++requestId
+        updateRouteStatus("◈ "+task+" · "+candidates.first()+" · 请求中 · 免费候选 "+candidates.size+" 个")
         busy=true;send.isEnabled=false;send.alpha=.5f
         thread {
             val switchLog=mutableListOf<String>()
@@ -496,6 +510,11 @@ class MainActivity : Activity() {
                         val authError=lastError.contains("HTTP 401") || lastError.contains("HTTP 403")
                         if(partial.isNotEmpty() || locked || authError || index==candidates.lastIndex)break
                         switchLog.add("↪ "+id+" 不可用："+lastError.take(80)+"，切换免费备用模型")
+                        val switching=index+1
+                        runOnUiThread{
+                            if(thisRequest==requestId)updateRouteStatus("◈ "+task+" · 重试 "+switching+
+                                " · 原因："+lastError.take(56))
+                        }
                     }finally{
                         connection?.disconnect()
                         activeConnection=null
@@ -504,6 +523,9 @@ class MainActivity : Activity() {
                 val elapsed=System.currentTimeMillis()-started
                 runOnUiThread{
                     if(thisRequest==requestId){
+                        updateRouteStatus("◈ "+task+" · "+usedModel+" · "+
+                            (if(finalAnswer!=null)"成功" else "失败")+" · "+elapsed+"ms · "+
+                            (if(switchLog.isEmpty())"未切换" else "切换 "+switchLog.size+" 次"))
                         val explanation="\\n\\n—— 调度信息 ——\\n"+
                             "任务："+task+" · 模型："+usedModel+" · 耗时："+elapsed+"ms"+
                             if(switchLog.isEmpty())"" else "\\n"+switchLog.joinToString("\\n")
