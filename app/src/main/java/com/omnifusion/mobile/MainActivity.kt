@@ -130,7 +130,7 @@ class MainActivity : Activity() {
         row.addView(button("◆ ${model.substringAfterLast('/')} ▾"){modelDialog()},LinearLayout.LayoutParams(0,-2,1f))
         row.addView(button("＋"){chats.put(newChat());current=chats.length()-1;persist();navigate(0)})
         body.addView(row)
-        stream=ScrollView(this).apply{fillViewport=true}
+        stream=ScrollView(this).apply{isFillViewport=true}
         transcript=vertical().apply{setPadding(dp(17),dp(10),dp(17),dp(15))}
         stream.addView(transcript);body.addView(stream,LinearLayout.LayoutParams(-1,0,1f))
         if(items().length()==0){
