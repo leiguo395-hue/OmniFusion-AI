@@ -107,9 +107,7 @@ class MainActivity : Activity() {
         return old
     }
     // Prevent pasted prompts and multiline text from becoming HTTP Authorization headers.
-    private fun validRouterKey(key:String):Boolean =
-        key.length in 12..512 && key.startsWith("sk-or-") &&
-        key.all { it.code in 33..126 } && !key.contains(" ")
+    private fun validRouterKey(key:String):Boolean = ApiCredential.valid(key)
 
     private fun requireRouterKey():String? {
         val key=secureKey()
